@@ -9,7 +9,8 @@ import traceback
 
 
 from fastapi import FastAPI, Request, Form, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse,JSONResponse
+
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from docxtpl import DocxTemplate, InlineImage
@@ -73,6 +74,17 @@ async def new_resume_cmd(m: Message):
 # FASTAPI APP + TEMPLATES
 # =========================
 app = FastAPI()
+
+# ↓↓↓ YANGI QO‘SHILGAN QISM ↓↓↓
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    # logga yozamiz (Railway Logs'da ko‘rasan)
+    print("=== GLOBAL ERROR ===", file=sys.stderr)
+    print(repr(exc), file=sys.stderr)
+    traceback.print_exc()
+    # front doim JSON kuta oladi
+    return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
+
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(
@@ -180,14 +192,16 @@ async def send_resume_data(
     # DOCX generatsiya
     doc = DocxTemplate(tpl_path)
 
+    # --- rasm bo'lmasa ham yiqilmasin ---
     inline_img = None
-    if photo:
-        img_bytes = await photo.read()
-        # Rasmni InlineImage sifatida joylaymiz (eni ~35 mm, 3x4ga yaqin)
-        try:
-            inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
-        except Exception:
-            inline_img = None
+    try:
+        if photo is not None and getattr(photo, "filename", ""):
+            img_bytes = await photo.read()
+            if img_bytes:  # bo'sh emas
+                inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
+    except Exception as e:
+        print("PHOTO ERROR:", repr(e), file=sys.stderr)
+        inline_img = None
     ctx["photo"] = inline_img
 
     buf = io.BytesIO()
