@@ -10,7 +10,7 @@ from aiogram.filters import Command
 
 # ===== CONFIG =====
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
-APP_BASE = os.getenv("APP_BASE", "https://your-railway-app.up.railway.app")
+APP_BASE = os.getenv("APP_BASE", "ofmbot-production.up.railway.app")
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
