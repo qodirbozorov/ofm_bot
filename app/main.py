@@ -166,8 +166,8 @@ async def send_resume_data(
 # ===== TELEGRAM WEBHOOK =====
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
-    update = Update.model_validate(await request.json())
-    await dp.feed_update(bot, update)
+    data = await request.json()
+    await dp.feed_raw_update(bot, data)
     return {"ok": True}
 
 @app.get("/bot/set_webhook")
