@@ -24,7 +24,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, W
 # Bot token (o'zing bergan)
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 # Railway domeningni xohlasang APP_BASE env orqali berasan:
-APP_BASE = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app/")
+APP_BASE = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app")
 
 # =========================
 # BOT SETUP
@@ -52,12 +52,12 @@ async def help_cmd(m: Message):
 
 @dp.message(Command("new_resume"))
 async def new_resume_cmd(m: Message):
-    ACTIVE_USERS.add(m.from_user.id)
+    base = (APP_BASE or "").rstrip('/')  # <<— MUHIM
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[
             InlineKeyboardButton(
                 text="Obyektivkani to‘ldirish",
-                web_app=WebAppInfo(url=f"{APP_BASE}/form?id={m.from_user.id}")
+                web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
             )
         ]]
     )
@@ -65,6 +65,7 @@ async def new_resume_cmd(m: Message):
            "✅ Tez\n✅ Oson\n✅ Ishonchli\n"
            "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
     await m.answer(txt, reply_markup=kb)
+ 
 
 # =========================
 # FASTAPI APP + TEMPLATES
