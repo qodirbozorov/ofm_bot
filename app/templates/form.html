@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rezyume shakli</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#111; color:#eee; }
+    .section { display:flex; flex-direction:column; gap:8px; margin:12px 0; }
+    input, textarea, button { padding:10px; border-radius:8px; border:1px solid #444; background:#1a1a1a; color:#eee; }
+    label { font-weight:600; margin-top:6px; }
+    .yoq-btn { display:inline-block; padding:6px 10px; background:#333; border-radius:6px; cursor:pointer; margin-left:8px; }
+    .relative { border:1px dashed #333; padding:10px; border-radius:8px; margin:8px 0; }
+    #readyBtn[disabled]{ opacity:.6; }
+  </style>
+</head>
+<body>
+  <h2>Rezyume shakli</h2>
+  <form id="resumeForm">
+    <div class="section">
+      <label>To‘liq Ism Familiya Sharifingiz</label>
+      <input name="full_name" required placeholder="Aliyev Valijon Zokir o'g'li">
+
+      <label>Tug‘ilgan sana</label>
+      <input name="birth_date" type="date">
+
+      <label>Tug‘ilgan joyi</label>
+      <input name="birth_place" placeholder="Masalan: Andijon viloyati, Asaka tumani">
+
+      <label>Millati</label>
+      <input name="nationality" placeholder="O‘zbek">
+
+      <label>Partiyaviyligi</label>
+      <input name="party_membership" id="party_membership" placeholder="Masalan: Yo‘q yoki partiya nomi">
+      <span class="yoq-btn" onclick="document.getElementById('party_membership').value='Yo‘q'">Yo‘q</span>
+
+      <label>Ma’lumoti</label>
+      <input name="education" placeholder="Magistr, Oliy, o‘rta maxsus, umumiy o‘rta">
+
+      <label>Tamomlagan</label>
+      <input name="university" placeholder="2024-yil, Asaka tumani 26-maktab">
+
+      <label>Mutaxassisligi</label>
+      <input name="specialization" id="specialization">
+      <span class="yoq-btn" onclick="document.getElementById('specialization').value='Yo‘q'">Yo‘q</span>
+
+      <label>Ilmiy darajasi</label>
+      <input name="ilmiy_daraja" placeholder="Yo‘q">
+
+      <label>Ilmiy unvoni</label>
+      <input name="ilmiy_unvon" placeholder="Yo‘q">
+
+      <label>Qaysi chet tillarini biladi</label>
+      <input name="languages" placeholder="Ingliz, Rus">
+
+      <label>Davlat mukofotlari bilan taqdirlanganmi</label>
+      <input name="dav_mukofoti" placeholder="Yo‘q">
+
+      <label>Xalq deputatlari ... (to‘liq ko‘rsatilishi lozim)</label>
+      <input name="deputat" id="deputat">
+      <span class="yoq-btn" onclick="document.getElementById('deputat').value='Yo‘q'">Yo‘q</span>
+
+      <label>Doimiy yashash manzili (aniq ko'rsatilsin):</label>
+      <input name="adresss" placeholder="Masalan: Andijon viloyati, Asaka tumani, Shodlik ko’chasi, 6-uy">
+
+      <label>Joriy lavozim sanasi</label>
+      <input type="text" name="current_position_date" placeholder="Masalan: 2025 yil 2 sentabrdan">
+
+      <label>Joriy lavozim to‘liq</label>
+      <input type="text" name="current_position_full" placeholder="Masalan: Toshkent transport universiteti 1-bosqich talabasi">
+
+      <label>Mehnat faoliyati</label>
+      <textarea name="work_experience" placeholder="Masalan: 2015-2020 - yillar. Toshkent sh. 1-maktabda O‘qituvchi,"></textarea>
+
+      <label>Telefon raqami</label>
+      <input type="text" name="phone" placeholder="+998901234567" required>
+
+      <input type="hidden" name="tg_id" id="tg_id" value="{{ tg_id }}">
+
+      <label>Rasm yuklash (3x4 hajmda bo'lishi shart)</label>
+      <input type="file" name="photo" id="photo" accept="image/*">
+    </div>
+
+    <div class="section">
+      <h3>Yaqin qarindoshlar</h3>
+      <div id="relatives"></div>
+      <button type="button" onclick="addRelative()">+ Qarindosh qo‘shish</button>
+    </div>
+
+    <button id="readyBtn" type="button" onclick="submitForm()">Tayyor</button>
+  </form>
+
+<script>
+function addRelative() {
+  const c = document.getElementById('relatives');
+  const div = document.createElement('div');
+  div.className = 'relative';
+  div.innerHTML = `
+    <label>Qarindoshligi</label>
+    <input name="relation_type" placeholder="ota/ona/aka/singil/turmush o'rtoq/o'g'il/qiz">
+    <label>F.I.O.</label>
+    <input name="relative_full_name">
+    <label>Tug‘ilgan yili va joyi</label>
+    <input name="b_year_place" placeholder="1980-yil, Toshkent shahri">
+    <label>Ish joyi va lavozimi</label>
+    <input name="job_title" placeholder="Toshkent shahri 16-maktab, O'qituvchi">
+    <label>Yashash joyi</label>
+    <input name="address" placeholder="Andijon viloyati, Asaka tumani, Shodlik ko’chasi, 6-uy">
+  `;
+  c.appendChild(div);
+}
+
+async function submitForm() {
+  const btn = document.getElementById("readyBtn");
+  btn.disabled = true; btn.innerText = "Yuklanmoqda...";
+
+  const form = document.getElementById('resumeForm');
+  const fd = new FormData(form);
+
+  // relatives to JSON array
+  const items = [];
+  document.querySelectorAll('.relative').forEach(div => {
+    items.push({
+      relation_type: div.querySelector('[name="relation_type"]').value,
+      full_name: div.querySelector('[name="relative_full_name"]').value,
+      b_year_place: div.querySelector('[name="b_year_place"]').value,
+      job_title: div.querySelector('[name="job_title"]').value,
+      address: div.querySelector('[name="address"]').value
+    });
+  });
+  fd.append("relatives", JSON.stringify(items));
+
+  try {
+    const res = await fetch("/send_resume_data", { method: "POST", body: fd });
+    const out = await res.json();
+    if (out.status === "success") {
+      alert("✅ Ma’lumotnoma tayyor.\n\n✅ Chatda yuborildi!");
+      if (window.Telegram && Telegram.WebApp) { Telegram.WebApp.close(); }
+    } else { alert("❌ Xatolik: " + out.error); }
+  } catch (e) {
+    alert("❌ Serverga ulanishda xatolik: " + e.message);
+  } finally {
+    btn.disabled = false; btn.innerText = "Tayyor";
+  }
+}
+</script>
+</body>
+</html>
