@@ -24,7 +24,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, W
 # Bot token (o'zing bergan)
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 # Railway domeningni xohlasang APP_BASE env orqali berasan:
-APP_BASE = os.getenv("APP_BASE", "ofmbot-production.up.railway.app/")
+APP_BASE = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app/")
 
 # =========================
 # BOT SETUP
