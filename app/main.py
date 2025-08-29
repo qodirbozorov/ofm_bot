@@ -26,11 +26,11 @@ from aiogram.types import (
 )
 
 # =========================
-# KONFIG (hardcode – .env talab qilinmaydi)
+# KONFIG (env kerak emas)
 # =========================
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"  # trailing slashsiz
-GROUP_CHAT_ID = -1003046464831  # ma'lumotlar yuboriladigan guruh
+GROUP_CHAT_ID = -1003046464831  # ma'lumot jo'natiladigan guruh
 
 # =========================
 # AIROGRAM
@@ -80,9 +80,9 @@ async def new_resume_cmd(m: Message):
 app = FastAPI()
 
 
-# global xatolar 500 qaytarmasin – frontda JSON chiqsin
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
+    # 500 o'rniga JSON qaytaramiz (web app alert uchun qulay)
     print("=== GLOBAL ERROR ===", file=sys.stderr)
     print(repr(exc), file=sys.stderr)
     traceback.print_exc()
@@ -116,6 +116,13 @@ def make_safe_basename(full_name: str, phone: str) -> str:
     ph = (phone or "").strip() or "NaN"
     dm = datetime.utcnow().strftime("%d-%m")
     return f"{base}_{ph}_{dm}".lower()
+
+
+def pick_image_ext(upload_name: str | None) -> str:
+    ext = (os.path.splitext(upload_name or "")[1] or "").lower()
+    if ext in {".jpg", ".jpeg", ".png", ".webp"}:
+        return ext
+    return ".png"
 
 
 # =========================
@@ -167,18 +174,18 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # Yaqin qarindoshlar JSON
+    # 1) relatives JSON
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
         rels = []
 
-    # Template tekshirish
+    # 2) template tekshir
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # Context
+    # 3) context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -201,13 +208,15 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # DOCX render + rasm (ixtiyoriy)
+    # 4) DOCX render + rasm (ixtiyoriy)
     doc = DocxTemplate(tpl_path)
     inline_img = None
-    img = None  # guruhga photo sifatida yuborish uchun kerak
+    img = None  # guruhga file sifatida yuborish uchun
+    img_ext = ".png"
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img = await photo.read()  # baytlar
+            img = await photo.read()
+            img_ext = pick_image_ext(photo.filename)
             if img:
                 inline_img = InlineImage(doc, io.BytesIO(img), width=Mm(35))
     except Exception as e:
@@ -215,31 +224,33 @@ async def send_resume_data(
 
     ctx["photo"] = inline_img
 
-    # DOCX bytes
+    # 5) DOCX bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-    # PDF bytes
+    # 6) PDF bytes
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # Fayl nomlari
+    # 7) nomlar
     base_name = make_safe_basename(full_name, phone)
     docx_name = f"{base_name}_0.docx"
     pdf_name = f"{base_name}_0.pdf"
+    img_name = f"{base_name}{img_ext}"
+    json_name = f"{base_name}.json"
 
-    # ---------- 1) Guruhga yuborish ----------
+    # 8) GURUHGA: rasmni ham, jsonni ham FILE (document) sifatida yuboramiz
     try:
-        # a) Rasm bo'lsa – alohida xabar
+        # a) rasm (agar bor bo'lsa) — document ko'rinishida (filename saqlanadi)
         if img:
-            await bot.send_photo(
+            await bot.send_document(
                 GROUP_CHAT_ID,
-                BufferedInputFile(img, filename=f"{base_name}.png"),
+                BufferedInputFile(img, filename=img_name),
                 caption=f"🆕 Yangi forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
             )
 
-        # b) JSON – alohida hujjat
+        # b) json — alohida document
         payload = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "tg_id": tg_id,
@@ -266,14 +277,14 @@ async def send_resume_data(
         json_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         await bot.send_document(
             GROUP_CHAT_ID,
-            BufferedInputFile(json_bytes, filename=f"{base_name}.json"),
+            BufferedInputFile(json_bytes, filename=json_name),
             caption=f"📄 Ma'lumotlar JSON: {full_name}"
         )
     except Exception as e:
         print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
 
-    # ---------- 2) Mijozga DOCX + PDF ----------
+    # 9) MIJOZGA: DOCX + PDF
     try:
         chat_id = int(tg_id)
         await bot.send_document(
@@ -296,7 +307,7 @@ async def send_resume_data(
 
 
 # =========================
-# WEBHOOK ENDPOINTLAR
+# WEBHOOK
 # =========================
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
