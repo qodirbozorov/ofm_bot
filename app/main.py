@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import traceback
 
+
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -17,6 +18,7 @@ from docx.shared import Mm
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update
+from aiogram.types import BufferedInputFile
 
 # =========================
 # CONFIG
@@ -208,16 +210,35 @@ async def send_resume_data(
     docx_name = f"{safe_name}_0.docx"
     pdf_name  = f"{safe_name}_0.pdf"
 
-    # Telegramga yuborish
+       # Telegramga yuborish
     try:
         chat_id = int(tg_id)
-        await bot.send_document(chat_id, document=(docx_name, io.BytesIO(docx_bytes)), caption="✅ Word formatdagi rezyume")
+
+        # DOCX (xotiradagi baytlar -> InputFile)
+        docx_input = BufferedInputFile(docx_bytes, filename=docx_name)
+        await bot.send_document(
+            chat_id,
+            document=docx_input,
+            caption="✅ Word formatdagi rezyume"
+        )
+
+        # PDF bo'lsa, uni ham yuboramiz
         if pdf_bytes:
-            await bot.send_document(chat_id, document=(pdf_name, io.BytesIO(pdf_bytes)), caption="✅ PDF formatdagi rezyume")
+            pdf_input = BufferedInputFile(pdf_bytes, filename=pdf_name)
+            await bot.send_document(
+                chat_id,
+                document=pdf_input,
+                caption="✅ PDF formatdagi rezyume"
+            )
         else:
-            await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
+            await bot.send_message(
+                chat_id,
+                "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi."
+            )
+
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)})
+
 
     return {"status": "success"}
 
