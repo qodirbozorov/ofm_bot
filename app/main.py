@@ -10,7 +10,6 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from docxtpl import DocxTemplate, InlineImage
@@ -27,14 +26,9 @@ from aiogram.types import (
 # =========================
 # CONFIG (ENV bilan)
 # =========================
-# Tokenni sen o'zing bergansan — shu yerda qoldirdim.
 BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
-
-# APP_BASE — Railway Variables’dan; default sifatida hozirgi domeningni qoldirdim.
 APP_BASE: str = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app").rstrip("/")
-
-# PostgreSQL (Railway Variables → DATABASE_URL)
-DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # postgresql+asyncpg://...
+DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # postgresql+asyncpg://USER:PASS@HOST:PORT/DB
 
 # =========================
 # SQLAlchemy (async) setup
@@ -88,7 +82,7 @@ engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True) if DA
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False) if engine else None
 
 # =========================
-# FastAPI app + static + templates
+# FastAPI app + templates
 # =========================
 app = FastAPI()
 
@@ -99,10 +93,6 @@ async def global_exception_handler(request, exc):
     print(repr(exc), file=sys.stderr)
     traceback.print_exc()
     return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
-
-# Static (external CSS uchun)
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Templates
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -263,7 +253,7 @@ async def send_resume_data(
         if photo is not None and getattr(photo, "filename", ""):
             img_bytes = await photo.read()
             if img_bytes:
-                raw_photo_bytes = img_bytes  # DB uchun saqlash
+                raw_photo_bytes = img_bytes  # DB uchun
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
     except Exception as e:
         print("PHOTO ERROR:", repr(e), file=sys.stderr)
@@ -316,7 +306,7 @@ async def send_resume_data(
         except Exception as e:
             print("DB SAVE ERROR:", repr(e), file=sys.stderr)
             traceback.print_exc()
-            # DB xato bo‘lsa ham oqimni to‘xtatmaymiz
+            # DB xato bo‘lsa ham oqim davom etadi
 
     # DOCX → PDF (LibreOffice)
     try:
