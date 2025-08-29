@@ -1,23 +1,22 @@
-import os, io, json, pdfkit
+import os, io, json, tempfile, subprocess
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update
+from aiogram.filters import Command
 
-# ====== CONFIG (env shart emas dedingiz, shu yerga qo'ydim) ======
+# ===== CONFIG =====
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = os.getenv("APP_BASE", "https://your-railway-app.up.railway.app")
 
-# ====== BOT ======
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
-
 ACTIVE_USERS = set()
 
+# ===== BOT HANDLERS =====
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
     ACTIVE_USERS.add(m.from_user.id)
@@ -49,7 +48,7 @@ async def new_resume_cmd(m: Message):
            "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
     await m.answer(txt, reply_markup=kb)
 
-# ====== WEB APP (FastAPI) ======
+# ===== FASTAPI APP =====
 app = FastAPI()
 env = Environment(
     loader=FileSystemLoader(os.path.join(os.path.dirname(__file__), "templates")),
@@ -64,6 +63,19 @@ def root():
 def get_form(id: str = ""):
     tpl = env.get_template("form.html")
     return tpl.render(tg_id=id)
+
+# === DOCX -> PDF helper ===
+def convert_docx_to_pdf(docx_bytes: bytes) -> bytes:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        docx_path = os.path.join(tmpdir, "resume.docx")
+        pdf_path = os.path.join(tmpdir, "resume.pdf")
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
+        subprocess.run([
+            "soffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path
+        ], check=True)
+        with open(pdf_path, "rb") as f:
+            return f.read()
 
 @app.post("/send_resume_data")
 async def send_resume_data(
@@ -89,7 +101,6 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # relatives JSON
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
@@ -117,46 +128,42 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # === DOCX: render with docxtpl ===
+    # DOCX generatsiya
     tpl_path = os.path.join(os.path.dirname(__file__), "templates", "resume.docx")
     doc = DocxTemplate(tpl_path)
 
     inline_img = None
-    if photo is not None:
+    if photo:
         img_bytes = await photo.read()
         try:
-            # If image is valid, add as InlineImage (35mm width ~ 3x4 photo)
             inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
-        except Exception:
+        except:
             inline_img = None
     ctx["photo"] = inline_img
 
-    docx_buf = io.BytesIO()
+    buf = io.BytesIO()
     doc.render(ctx)
-    doc.save(docx_buf)
-    docx_buf.seek(0)
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
 
-    # === PDF: render HTML -> PDF via wkhtmltopdf (pdfkit) ===
-    html_tpl = env.get_template("resume.html")
-    html_str = html_tpl.render(ctx)
-    pdf_buf = io.BytesIO(pdfkit.from_string(html_str, False))
+    # DOCX → PDF
+    pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # file names
+    # Fayl nomlari
     safe_name = "_".join(full_name.split())
     docx_name = f"{safe_name}_0.docx"
-    pdf_name  = f"{safe_name}_0.pdf"
+    pdf_name = f"{safe_name}_0.pdf"
 
-    # send to Telegram chat
     try:
         chat_id = int(tg_id)
-        await bot.send_document(chat_id, document=(docx_name, docx_buf), caption="✅ Word formatdagi rezyume")
-        await bot.send_document(chat_id, document=(pdf_name, pdf_buf), caption="✅ PDF formatdagi rezyume")
+        await bot.send_document(chat_id, document=(docx_name, io.BytesIO(docx_bytes)), caption="✅ Word formatdagi rezyume")
+        await bot.send_document(chat_id, document=(pdf_name, io.BytesIO(pdf_bytes)), caption="✅ PDF formatdagi rezyume")
     except Exception as e:
-        return JSONResponse({"status":"error", "error": str(e)})
+        return JSONResponse({"status": "error", "error": str(e)})
 
     return {"status": "success"}
 
-# ====== TELEGRAM WEBHOOK ======
+# ===== TELEGRAM WEBHOOK =====
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
     update = Update.model_validate(await request.json())
@@ -165,7 +172,6 @@ async def telegram_webhook(request: Request):
 
 @app.get("/bot/set_webhook")
 async def set_webhook(base: str | None = None):
-    # Use provided ?base=... or APP_BASE
     base_url = base or APP_BASE
     await bot.set_webhook(f"{base_url}/bot/webhook")
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
