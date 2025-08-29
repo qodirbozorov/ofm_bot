@@ -8,6 +8,10 @@ import tempfile
 import traceback
 
 
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Integer, String, Text, LargeBinary, ForeignKey, JSON, DateTime, func
+
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse,JSONResponse
 
@@ -28,6 +32,7 @@ from aiogram.types import BufferedInputFile
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 # Railway domeningni xohlasang APP_BASE env orqali berasan:
 APP_BASE = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app")
+DATABASE_URL = os.getenv("DATABASE_URL")  # Railway Variables'dan
 
 # =========================
 # BOT SETUP
@@ -70,10 +75,71 @@ async def new_resume_cmd(m: Message):
     await m.answer(txt, reply_markup=kb)
  
 
+# --- SQLAlchemy setup ---
+class Base(DeclarativeBase):
+    pass
+
+class Submission(Base):
+    __tablename__ = "submissions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tg_id: Mapped[str] = mapped_column(String(32))
+    full_name: Mapped[str] = mapped_column(String(256))
+    phone: Mapped[str] = mapped_column(String(64))
+    birth_date: Mapped[str] = mapped_column(String(64), default="")
+    birth_place: Mapped[str] = mapped_column(String(256), default="")
+    nationality: Mapped[str] = mapped_column(String(64), default="")
+    party_membership: Mapped[str] = mapped_column(String(128), default="")
+    education: Mapped[str] = mapped_column(String(128), default="")
+    university: Mapped[str] = mapped_column(String(256), default="")
+    specialization: Mapped[str] = mapped_column(String(256), default="")
+    ilmiy_daraja: Mapped[str] = mapped_column(String(256), default="")
+    ilmiy_unvon: Mapped[str] = mapped_column(String(256), default="")
+    languages: Mapped[str] = mapped_column(String(256), default="")
+    dav_mukofoti: Mapped[str] = mapped_column(String(256), default="")
+    deputat: Mapped[str] = mapped_column(String(256), default="")
+    adresss: Mapped[str] = mapped_column(String(512), default="")
+    current_position_date: Mapped[str] = mapped_column(String(256), default="")
+    current_position_full: Mapped[str] = mapped_column(String(512), default="")
+    work_experience: Mapped[str] = mapped_column(Text, default="")
+    photo_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)  # ixtiyoriy
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    relatives: Mapped[list["Relative"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
+
+class Relative(Base):
+    __tablename__ = "relatives"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"))
+    relation_type: Mapped[str] = mapped_column(String(64), default="")
+    full_name: Mapped[str] = mapped_column(String(256), default="")
+    b_year_place: Mapped[str] = mapped_column(String(256), default="")
+    job_title: Mapped[str] = mapped_column(String(256), default="")
+    address: Mapped[str] = mapped_column(String(512), default="")
+
+    submission: Mapped["Submission"] = relationship(back_populates="relatives")
+
+# Async engine & session
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True) if DATABASE_URL else None
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False) if engine else None
+
+
+
 # =========================
 # FASTAPI APP + TEMPLATES
 # =========================
 app = FastAPI()
+
+
+
+@app.on_event("startup")
+async def on_startup():
+    if engine:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    else:
+        print("⚠️ DATABASE_URL yo‘q, DB o‘chirilgan rejimda ishlayapti.", file=sys.stderr)
+
+
 
 # ↓↓↓ YANGI QO‘SHILGAN QISM ↓↓↓
 @app.exception_handler(Exception)
@@ -133,6 +199,7 @@ def convert_docx_to_pdf(docx_bytes: bytes) -> bytes:
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
+    
     full_name: str = Form(...),
     phone: str = Form(...),
     tg_id: str = Form(...),
@@ -190,24 +257,79 @@ async def send_resume_data(
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=500)
 
     # DOCX generatsiya
+    # DOCX generatsiya
     doc = DocxTemplate(tpl_path)
 
-    # --- rasm bo'lmasa ham yiqilmasin ---
+    # --- rasm bo'lmasa ham xotirjam ishlashi va DB uchun bytes saqlash ---
+    raw_photo_bytes = None
     inline_img = None
-    try:
-        if photo is not None and getattr(photo, "filename", ""):
+    if photo and getattr(photo, "filename", ""):
+        try:
             img_bytes = await photo.read()
-            if img_bytes:  # bo'sh emas
+            if img_bytes:
+                raw_photo_bytes = img_bytes  # DB uchun saqlaymiz
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
-    except Exception as e:
-        print("PHOTO ERROR:", repr(e), file=sys.stderr)
-        inline_img = None
+        except Exception as e:
+            print("PHOTO ERROR:", repr(e), file=sys.stderr)
+            inline_img = None
+
+    ctx["photo"] = inline_img
+
+
+    buf = io.BytesIO()
+    doc.render(ctx)
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
+
+
     ctx["photo"] = inline_img
 
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
+
+    # --- DB: saqlash ---
+    if AsyncSessionLocal:
+        try:
+            async with AsyncSessionLocal() as session:
+                sub = Submission(
+                    tg_id=tg_id,
+                    full_name=full_name,
+                    phone=phone,
+                    birth_date=birth_date,
+                    birth_place=birth_place,
+                    nationality=nationality,
+                    party_membership=party_membership,
+                    education=education,
+                    university=university,
+                    specialization=specialization,
+                    ilmiy_daraja=ilmiy_daraja,
+                    ilmiy_unvon=ilmiy_unvon,
+                    languages=languages,
+                    dav_mukofoti=dav_mukofoti,
+                    deputat=deputat,
+                    adresss=adresss,
+                    current_position_date=current_position_date,
+                    current_position_full=current_position_full,
+                    work_experience=work_experience,
+                    photo_bytes=raw_photo_bytes
+                )
+                # relatives listini qo‘shamiz
+                for r in rels:
+                    sub.relatives.append(Relative(
+                        relation_type=r.get("relation_type", ""),
+                        full_name=r.get("full_name", ""),
+                        b_year_place=r.get("b_year_place", ""),
+                        job_title=r.get("job_title", ""),
+                        address=r.get("address", ""),
+                    ))
+                session.add(sub)
+                await session.commit()
+        except Exception as e:
+            print("DB SAVE ERROR:", repr(e), file=sys.stderr)
+            traceback.print_exc()
+            # DB xatolik qilsa ham oqim to‘xtamasin
 
     # DOCX → PDF (LibreOffice)
     try:
