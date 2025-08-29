@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import traceback
 from typing import Optional
+from datetime import datetime
 
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -21,16 +22,18 @@ from aiogram.types import (
     Message,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update,
     BufferedInputFile,
+    InputMediaPhoto, InputMediaDocument,
 )
 
 # =========================
-# CONFIG
+# CONFIG (env shart emas)
 # =========================
-BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"  # o'zingniki
+BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE: str = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app").rstrip("/")
+GROUP_CHAT_ID: int = -1003046464831  # guruh ID (supergroup)
 
 # =========================
-# AIROGRAM (pollersiz, faqat webhook)
+# AIROGRAM
 # =========================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -72,7 +75,7 @@ async def new_resume_cmd(m: Message):
 # =========================
 app = FastAPI()
 
-# global JSON error (frontga 500 emas, JSON qaytadi)
+# 500 o‘rniga JSON qaytarish (frontda alert chiqishi uchun)
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     print("=== GLOBAL ERROR ===", file=sys.stderr)
@@ -80,7 +83,6 @@ async def global_exception_handler(request, exc):
     traceback.print_exc()
     return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
 
-# templates
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(
     loader=FileSystemLoader(TEMPLATES_DIR),
@@ -93,7 +95,6 @@ def root():
 
 @app.get("/form", response_class=HTMLResponse)
 def get_form(id: str = ""):
-    """WebApp forma (templates/form.html)."""
     tpl = env.get_template("form.html")
     return tpl.render(tg_id=id)
 
@@ -119,7 +120,7 @@ def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
             return None
 
 # =========================
-# FORMA QABUL QILISH (DB yo'q)
+# FORMA QABUL QILISH (DB yo‘q)
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
@@ -145,18 +146,18 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # relatives JSON
+    # Relatives JSON
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
         rels = []
 
-    # templatega yo'l
+    # Template tekshirish
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # context
+    # Context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -179,9 +180,10 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # DOCX render + optional photo
+    # DOCX render + rasm (ixtiyoriy)
     doc = DocxTemplate(tpl_path)
     inline_img = None
+    img = None  # guruhga photo sifatida yuborish uchun
     try:
         if photo is not None and getattr(photo, "filename", ""):
             img = await photo.read()
@@ -192,27 +194,94 @@ async def send_resume_data(
 
     ctx["photo"] = inline_img
 
+    # DOCX bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-    # PDF
+    # PDF bytes (agar chiqmadi — None)
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # fayl nomlari
+    # Fayl nomlari
     safe_name = "_".join(full_name.split())
     docx_name = f"{safe_name}_0.docx"
     pdf_name  = f"{safe_name}_0.pdf"
 
-    # chatga yuborish
+    # ---- GURUHGA: rasm + JSON ni bitta albom (media group) qilib yuboramiz ----
+    try:
+        # JSON payload
+        payload = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "tg_id": tg_id,
+            "full_name": full_name,
+            "phone": phone,
+            "birth_date": birth_date,
+            "birth_place": birth_place,
+            "nationality": nationality,
+            "party_membership": party_membership,
+            "education": education,
+            "university": university,
+            "specialization": specialization,
+            "ilmiy_daraja": ilmiy_daraja,
+            "ilmiy_unvon": ilmiy_unvon,
+            "languages": languages,
+            "dav_mukofoti": dav_mukofoti,
+            "deputat": deputat,
+            "adresss": adresss,
+            "current_position_date": current_position_date,
+            "current_position_full": current_position_full,
+            "work_experience": work_experience,
+            "relatives": rels,
+        }
+        json_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        json_name  = f"{safe_name.lower()}_{datetime.utcnow().strftime('%H%M%S')}.json"
+
+        media = []
+
+        if img:
+            media.append(
+                InputMediaPhoto(
+                    media=BufferedInputFile(img, filename=f"{safe_name.lower()}.png"),
+                    caption=f"🆕 Yangi forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
+                )
+            )
+
+        # JSON har doim ketadi (albatta bor)
+        media.append(
+            InputMediaDocument(
+                media=BufferedInputFile(json_bytes, filename=json_name)
+            )
+        )
+
+        # Agar faqat JSON bo'lsa, media-group xato beradi; buni hisobga olamiz:
+        if len(media) == 1:
+            await bot.send_document(
+                GROUP_CHAT_ID,
+                BufferedInputFile(json_bytes, filename=json_name),
+                caption=f"🆕 Yangi forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
+            )
+        else:
+            await bot.send_media_group(GROUP_CHAT_ID, media=media)
+
+    except Exception as e:
+        print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+
+    # ---- MIJOZGA: DOCX + PDF ----
     try:
         chat_id = int(tg_id)
-        await bot.send_document(chat_id, BufferedInputFile(docx_bytes, filename=docx_name),
-                                caption="✅ Word formatdagi rezyume")
+        await bot.send_document(
+            chat_id,
+            BufferedInputFile(docx_bytes, filename=docx_name),
+            caption="✅ Word formatdagi rezyume"
+        )
         if pdf_bytes:
-            await bot.send_document(chat_id, BufferedInputFile(pdf_bytes, filename=pdf_name),
-                                    caption="✅ PDF formatdagi rezyume")
+            await bot.send_document(
+                chat_id,
+                BufferedInputFile(pdf_bytes, filename=pdf_name),
+                caption="✅ PDF formatdagi rezyume"
+            )
         else:
             await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
     except Exception as e:
