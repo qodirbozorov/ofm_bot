@@ -12,6 +12,8 @@ from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+
+
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
 
@@ -36,6 +38,12 @@ DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # postgresql+asyncpg://
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import Integer, String, Text, LargeBinary, ForeignKey, DateTime, func, text
+
+
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+
+
 
 class Base(DeclarativeBase):
     pass
@@ -78,8 +86,41 @@ class Relative(Base):
     address: Mapped[str] = mapped_column(String(512), default="")
     submission: Mapped["Submission"] = relationship(back_populates="relatives")
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True) if DATABASE_URL else None
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False) if engine else None
+def _normalize_db_url(url: str) -> str:
+    u = (url or "").strip()
+    # postgres:// -> postgresql://
+    if u.startswith("postgres://"):
+        u = "postgresql://" + u[len("postgres://"):]
+    # postgresql:// -> postgresql+asyncpg://
+    if u.startswith("postgresql://"):
+        u = "postgresql+asyncpg://" + u[len("postgresql://"):]
+    sp = urlsplit(u)
+    # ssl/sslmode ni tozalaymiz
+    qs = [(k, v) for k, v in parse_qsl(sp.query, keep_blank_values=True)
+          if k.lower() not in ("sslmode", "ssl")]
+    # public host bo'lsa ssl=true qo'shamiz (private hostlarda kerak emas)
+    host = (sp.hostname or "").lower()
+    is_public = any(x in host for x in ("railway.app", "rlwy.net", "proxy.rlwy.net"))
+    if is_public:
+        qs.append(("ssl", "true"))
+    new_q = urlencode(qs)
+    return urlunsplit((sp.scheme, sp.netloc, sp.path, new_q, sp.fragment))
+
+# --- Engine va Session factory ---
+engine = None
+AsyncSessionLocal = None
+if DATABASE_URL:
+    try:
+        db_url = _normalize_db_url(DATABASE_URL)
+        # parolsiz ko'rsatish (faqat host/port/path)
+        print(f"DB URL normalized → {db_url.split('@')[-1]}", file=sys.stderr)
+        engine = create_async_engine(db_url, echo=False, pool_pre_ping=True)
+        AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    except Exception as e:
+        print("DB URL NORMALIZE/ENGINE ERROR:", repr(e), file=sys.stderr)
+else:
+    print("⚠️ DATABASE_URL topilmadi — DB o‘chirilgan rejimda.", file=sys.stderr)
+
 
 # =========================
 # FastAPI app + templates
