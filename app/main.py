@@ -20,122 +20,17 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update,
-    BufferedInputFile
+    BufferedInputFile,
 )
 
 # =========================
-# CONFIG (ENV + defaults)
+# CONFIG
 # =========================
-BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
+BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"  # o'zingniki
 APP_BASE: str = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app").rstrip("/")
-DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # public: ...?ssl=true , private: no query
 
 # =========================
-# SQLAlchemy (async) setup
-# =========================
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, Text, LargeBinary, ForeignKey, DateTime, func, text
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
-
-class Base(DeclarativeBase):
-    pass
-
-class Submission(Base):
-    __tablename__ = "submissions"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tg_id: Mapped[str] = mapped_column(String(32))
-    full_name: Mapped[str] = mapped_column(String(256))
-    phone: Mapped[str] = mapped_column(String(64))
-    birth_date: Mapped[str] = mapped_column(String(64), default="")
-    birth_place: Mapped[str] = mapped_column(String(256), default="")
-    nationality: Mapped[str] = mapped_column(String(64), default="")
-    party_membership: Mapped[str] = mapped_column(String(128), default="")
-    education: Mapped[str] = mapped_column(String(128), default="")
-    university: Mapped[str] = mapped_column(String(256), default="")
-    specialization: Mapped[str] = mapped_column(String(256), default="")
-    ilmiy_daraja: Mapped[str] = mapped_column(String(256), default="")
-    ilmiy_unvon: Mapped[str] = mapped_column(String(256), default="")
-    languages: Mapped[str] = mapped_column(String(256), default="")
-    dav_mukofoti: Mapped[str] = mapped_column(String(256), default="")
-    deputat: Mapped[str] = mapped_column(String(256), default="")
-    adresss: Mapped[str] = mapped_column(String(512), default="")
-    current_position_date: Mapped[str] = mapped_column(String(256), default="")
-    current_position_full: Mapped[str] = mapped_column(String(512), default="")
-    work_experience: Mapped[str] = mapped_column(Text, default="")
-    photo_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    relatives: Mapped[list["Relative"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
-
-class Relative(Base):
-    __tablename__ = "relatives"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"))
-    relation_type: Mapped[str] = mapped_column(String(64), default="")
-    full_name: Mapped[str] = mapped_column(String(256), default="")
-    b_year_place: Mapped[str] = mapped_column(String(256), default="")
-    job_title: Mapped[str] = mapped_column(String(256), default="")
-    address: Mapped[str] = mapped_column(String(512), default="")
-    submission: Mapped["Submission"] = relationship(back_populates="relatives")
-
-def _normalize_db_url(url: str) -> str:
-    """
-    Nima yozsang ham to'g'ri asyncpg formatga aylantirib beradi.
-    - postgres:// -> postgresql://
-    - postgresql:// -> postgresql+asyncpg://
-    - public host bo'lsa: ssl=true qo'shadi, private bo'lsa query'ni tozalaydi
-    """
-    u = (url or "").strip()
-    if u.startswith("postgres://"):
-        u = "postgresql://" + u[len("postgres://"):]
-    if u.startswith("postgresql://"):
-        u = "postgresql+asyncpg://" + u[len("postgresql://"):]
-    sp = urlsplit(u)
-    qs = [(k, v) for k, v in parse_qsl(sp.query, keep_blank_values=True)
-          if k.lower() not in ("sslmode", "ssl")]
-    host = (sp.hostname or "").lower()
-    is_public = any(x in host for x in ("railway.app", "rlwy.net", "proxy.rlwy.net"))
-    if is_public:
-        qs.append(("ssl", "true"))       # publicda ssl=true
-    # private'da hech narsa qo'shmaymiz
-    new_q = urlencode(qs)
-    return urlunsplit((sp.scheme, sp.netloc, sp.path, new_q, sp.fragment))
-
-engine = None
-AsyncSessionLocal = None
-if DATABASE_URL:
-    try:
-        db_url = _normalize_db_url(DATABASE_URL)
-        print(f"DB URL normalized → {db_url.split('@')[-1]}", file=sys.stderr)  # parolsiz ko'rsatamiz
-        engine = create_async_engine(db_url, echo=False, pool_pre_ping=True)
-        AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    except Exception as e:
-        print("DB URL NORMALIZE/ENGINE ERROR:", repr(e), file=sys.stderr)
-else:
-    print("⚠️ DATABASE_URL topilmadi — DB o‘chirilgan rejimda.", file=sys.stderr)
-
-# =========================
-# FastAPI app + templates
-# =========================
-app = FastAPI()
-
-# Global exception handler — front doim JSON oladi (500 o‘rniga)
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    print("=== GLOBAL ERROR ===", file=sys.stderr)
-    print(repr(exc), file=sys.stderr)
-    traceback.print_exc()
-    return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
-
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-env = Environment(
-    loader=FileSystemLoader(TEMPLATES_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
-)
-
-# =========================
-# Aiogram bot
+# AIROGRAM (pollersiz, faqat webhook)
 # =========================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -173,51 +68,58 @@ async def new_resume_cmd(m: Message):
     await m.answer(txt, reply_markup=kb)
 
 # =========================
-# Startup: DB jadvallarini yaratish
+# FASTAPI
 # =========================
-@app.on_event("startup")
-async def on_startup():
-    if engine:
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            print("DB: tables ready", file=sys.stderr)
-        except Exception as e:
-            print("DB INIT ERROR:", repr(e), file=sys.stderr)
-            traceback.print_exc()
-    else:
-        print("⚠️ DATABASE_URL topilmadi — DB o‘chirilgan rejimda.", file=sys.stderr)
+app = FastAPI()
 
-# =========================
-# HTTP endpoints
-# =========================
+# global JSON error (frontga 500 emas, JSON qaytadi)
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    print("=== GLOBAL ERROR ===", file=sys.stderr)
+    print(repr(exc), file=sys.stderr)
+    traceback.print_exc()
+    return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
+
+# templates
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+
 @app.get("/", response_class=PlainTextResponse)
 def root():
     return "OK"
 
 @app.get("/form", response_class=HTMLResponse)
 def get_form(id: str = ""):
+    """WebApp forma (templates/form.html)."""
     tpl = env.get_template("form.html")
     return tpl.render(tg_id=id)
 
 # =========================
 # DOCX -> PDF (LibreOffice)
 # =========================
-def convert_docx_to_pdf(docx_bytes: bytes) -> bytes:
+def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = os.path.join(tmpdir, "resume.docx")
         pdf_path = os.path.join(tmpdir, "resume.pdf")
         with open(docx_path, "wb") as f:
             f.write(docx_bytes)
-        subprocess.run(
-            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path],
-            check=True
-        )
-        with open(pdf_path, "rb") as f:
-            return f.read()
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path],
+                check=True
+            )
+            with open(pdf_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            print("DOCX->PDF ERROR:", repr(e), file=sys.stderr)
+            traceback.print_exc()
+            return None
 
 # =========================
-# Form data qabul qilish
+# FORMA QABUL QILISH (DB yo'q)
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
@@ -243,18 +145,18 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # relatives JSON parse
+    # relatives JSON
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
         rels = []
 
-    # Template yo‘li
+    # templatega yo'l
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # DOCX render context
+    # context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -277,104 +179,49 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # DOCX generatsiya + rasm ixtiyoriy
+    # DOCX render + optional photo
     doc = DocxTemplate(tpl_path)
-
-    raw_photo_bytes = None
     inline_img = None
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img_bytes = await photo.read()
-            if img_bytes:
-                raw_photo_bytes = img_bytes  # DB uchun
-                inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
+            img = await photo.read()
+            if img:
+                inline_img = InlineImage(doc, io.BytesIO(img), width=Mm(35))
     except Exception as e:
         print("PHOTO ERROR:", repr(e), file=sys.stderr)
-        inline_img = None
 
     ctx["photo"] = inline_img
 
-    # DOCX render & bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-    # --- DB saqlash (bor bo‘lsa) ---
-    if AsyncSessionLocal:
-        try:
-            async with AsyncSessionLocal() as session:
-                sub = Submission(
-                    tg_id=tg_id,
-                    full_name=full_name,
-                    phone=phone,
-                    birth_date=birth_date,
-                    birth_place=birth_place,
-                    nationality=nationality,
-                    party_membership=party_membership,
-                    education=education,
-                    university=university,
-                    specialization=specialization,
-                    ilmiy_daraja=ilmiy_daraja,
-                    ilmiy_unvon=ilmiy_unvon,
-                    languages=languages,
-                    dav_mukofoti=dav_mukofoti,
-                    deputat=deputat,
-                    adresss=adresss,
-                    current_position_date=current_position_date,
-                    current_position_full=current_position_full,
-                    work_experience=work_experience,
-                    photo_bytes=raw_photo_bytes
-                )
-                for r in rels:
-                    sub.relatives.append(Relative(
-                        relation_type=r.get("relation_type", ""),
-                        full_name=r.get("full_name", ""),
-                        b_year_place=r.get("b_year_place", ""),
-                        job_title=r.get("job_title", ""),
-                        address=r.get("address", ""),
-                    ))
-                session.add(sub)
-                await session.commit()
-        except Exception as e:
-            print("DB SAVE ERROR:", repr(e), file=sys.stderr)
-            traceback.print_exc()
-            # DB xato bo‘lsa ham oqim davom etadi
+    # PDF
+    pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # DOCX → PDF (LibreOffice)
-    try:
-        pdf_bytes = convert_docx_to_pdf(docx_bytes)
-    except Exception as e:
-        print("=== DOCX->PDF ERROR ===", file=sys.stderr)
-        print(repr(e), file=sys.stderr)
-        traceback.print_exc()
-        pdf_bytes = None
-
-    # Fayl nomlari
+    # fayl nomlari
     safe_name = "_".join(full_name.split())
     docx_name = f"{safe_name}_0.docx"
     pdf_name  = f"{safe_name}_0.pdf"
 
-    # Telegramga yuborish (BufferedInputFile)
+    # chatga yuborish
     try:
         chat_id = int(tg_id)
-
-        docx_input = BufferedInputFile(docx_bytes, filename=docx_name)
-        await bot.send_document(chat_id, document=docx_input, caption="✅ Word formatdagi rezyume")
-
+        await bot.send_document(chat_id, BufferedInputFile(docx_bytes, filename=docx_name),
+                                caption="✅ Word formatdagi rezyume")
         if pdf_bytes:
-            pdf_input = BufferedInputFile(pdf_bytes, filename=pdf_name)
-            await bot.send_document(chat_id, document=pdf_input, caption="✅ PDF formatdagi rezyume")
+            await bot.send_document(chat_id, BufferedInputFile(pdf_bytes, filename=pdf_name),
+                                    caption="✅ PDF formatdagi rezyume")
         else:
             await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
-
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
 
     return {"status": "success"}
 
 # =========================
-# Telegram webhook
+# TELEGRAM WEBHOOK
 # =========================
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
@@ -400,7 +247,7 @@ async def set_webhook(base: str | None = None):
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
 
 # =========================
-# Debug endpoints
+# DEBUG
 # =========================
 @app.get("/debug/ping")
 def debug_ping():
@@ -410,14 +257,3 @@ def debug_ping():
 async def debug_getme():
     me = await bot.get_me()
     return {"id": me.id, "username": me.username}
-
-@app.get("/debug/db_status")
-async def db_status():
-    if not AsyncSessionLocal:
-        return {"db": "disabled (DATABASE_URL yo‘q)"}
-    try:
-        async with AsyncSessionLocal() as s:
-            await s.execute(text("SELECT 1"))
-        return {"db": "ok"}
-    except Exception as e:
-        return {"db": "error", "detail": str(e)}
