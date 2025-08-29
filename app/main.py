@@ -6,15 +6,11 @@ import sys
 import subprocess
 import tempfile
 import traceback
-
-
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, Text, LargeBinary, ForeignKey, JSON, DateTime, func
+from typing import Optional
 
 from fastapi import FastAPI, Request, Form, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse,JSONResponse
-
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from docxtpl import DocxTemplate, InlineImage
@@ -22,60 +18,31 @@ from docx.shared import Mm
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update
-from aiogram.types import BufferedInputFile
+from aiogram.types import (
+    Message,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update,
+    BufferedInputFile
+)
 
 # =========================
-# CONFIG
+# CONFIG (ENV bilan)
 # =========================
-# Bot token (o'zing bergan)
-BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
-# Railway domeningni xohlasang APP_BASE env orqali berasan:
-APP_BASE = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway Variables'dan
+# Tokenni sen o'zing bergansan — shu yerda qoldirdim.
+BOT_TOKEN: str = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
+
+# APP_BASE — Railway Variables’dan; default sifatida hozirgi domeningni qoldirdim.
+APP_BASE: str = os.getenv("APP_BASE", "https://ofmbot-production.up.railway.app").rstrip("/")
+
+# PostgreSQL (Railway Variables → DATABASE_URL)
+DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # postgresql+asyncpg://...
 
 # =========================
-# BOT SETUP
+# SQLAlchemy (async) setup
 # =========================
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Integer, String, Text, LargeBinary, ForeignKey, DateTime, func, text
 
-# Oddiy "faol foydalanuvchi" hisoblagich (RAM-da)
-ACTIVE_USERS = set()
-
-@dp.message(Command("start"))
-async def start_cmd(m: Message):
-    ACTIVE_USERS.add(m.from_user.id)
-    text = (
-        f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
-        "/new_resume - Yangi obektivka\n"
-        "/help - Yordam\n\n"
-        "@octagon_print"
-    )
-    await m.answer(text)
-
-@dp.message(Command("help"))
-async def help_cmd(m: Message):
-    await m.answer("Savol bo‘lsa yozing: @octagon_print")
-
-@dp.message(Command("new_resume"))
-async def new_resume_cmd(m: Message):
-    base = (APP_BASE or "").rstrip('/')  # <<— MUHIM
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="Obyektivkani to‘ldirish",
-                web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
-            )
-        ]]
-    )
-    txt = ("👋 Assalomu alaykum!\n📄 Obyektivka (ma’lumotnoma)\n"
-           "✅ Tez\n✅ Oson\n✅ Ishonchli\n"
-           "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
-    await m.answer(txt, reply_markup=kb)
- 
-
-# --- SQLAlchemy setup ---
 class Base(DeclarativeBase):
     pass
 
@@ -101,7 +68,7 @@ class Submission(Base):
     current_position_date: Mapped[str] = mapped_column(String(256), default="")
     current_position_full: Mapped[str] = mapped_column(String(512), default="")
     work_experience: Mapped[str] = mapped_column(Text, default="")
-    photo_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)  # ixtiyoriy
+    photo_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     relatives: Mapped[list["Relative"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
@@ -115,58 +82,98 @@ class Relative(Base):
     b_year_place: Mapped[str] = mapped_column(String(256), default="")
     job_title: Mapped[str] = mapped_column(String(256), default="")
     address: Mapped[str] = mapped_column(String(512), default="")
-
     submission: Mapped["Submission"] = relationship(back_populates="relatives")
 
-# Async engine & session
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True) if DATABASE_URL else None
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False) if engine else None
 
-
-
 # =========================
-# FASTAPI APP + TEMPLATES
+# FastAPI app + static + templates
 # =========================
 app = FastAPI()
 
-
-
-@app.on_event("startup")
-async def on_startup():
-    if engine:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-    else:
-        print("⚠️ DATABASE_URL yo‘q, DB o‘chirilgan rejimda ishlayapti.", file=sys.stderr)
-
-
-
-# ↓↓↓ YANGI QO‘SHILGAN QISM ↓↓↓
+# Global exception handler — front doim JSON oladi (500 o‘rniga)
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    # logga yozamiz (Railway Logs'da ko‘rasan)
     print("=== GLOBAL ERROR ===", file=sys.stderr)
     print(repr(exc), file=sys.stderr)
     traceback.print_exc()
-    # front doim JSON kuta oladi
     return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
 
+# Static (external CSS uchun)
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# Templates
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(
     loader=FileSystemLoader(TEMPLATES_DIR),
     autoescape=select_autoescape(["html", "xml"]),
 )
 
+# =========================
+# Aiogram bot
+# =========================
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+ACTIVE_USERS = set()
+
+@dp.message(Command("start"))
+async def start_cmd(m: Message):
+    ACTIVE_USERS.add(m.from_user.id)
+    text = (
+        f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
+        "/new_resume - Yangi obektivka\n"
+        "/help - Yordam\n\n"
+        "@octagon_print"
+    )
+    await m.answer(text)
+
+@dp.message(Command("help"))
+async def help_cmd(m: Message):
+    await m.answer("Savol bo‘lsa yozing: @octagon_print")
+
+@dp.message(Command("new_resume"))
+async def new_resume_cmd(m: Message):
+    base = (APP_BASE or "").rstrip('/')
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Obyektivkani to‘ldirish",
+                web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
+            )
+        ]]
+    )
+    txt = ("👋 Assalomu alaykum!\n📄 Obyektivka (ma’lumotnoma)\n"
+           "✅ Tez\n✅ Oson\n✅ Ishonchli\n"
+           "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
+    await m.answer(txt, reply_markup=kb)
+
+# =========================
+# Startup: DB jadvallarini yaratish
+# =========================
+@app.on_event("startup")
+async def on_startup():
+    if engine:
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            print("DB: tables ready", file=sys.stderr)
+        except Exception as e:
+            print("DB INIT ERROR:", repr(e), file=sys.stderr)
+            traceback.print_exc()
+    else:
+        print("⚠️ DATABASE_URL topilmadi — DB o‘chirilgan rejimda.", file=sys.stderr)
+
+# =========================
+# HTTP endpoints
+# =========================
 @app.get("/", response_class=PlainTextResponse)
 def root():
     return "OK"
 
 @app.get("/form", response_class=HTMLResponse)
 def get_form(id: str = ""):
-    """
-    WebApp forma. templates/form.html ichida {{ tg_id }} ishlatiladi.
-    """
     tpl = env.get_template("form.html")
     return tpl.render(tg_id=id)
 
@@ -174,32 +181,23 @@ def get_form(id: str = ""):
 # DOCX -> PDF (LibreOffice)
 # =========================
 def convert_docx_to_pdf(docx_bytes: bytes) -> bytes:
-    """
-    LibreOffice (soffice) orqali DOCX'ni PDF'ga aylantiradi.
-    Dockerfile'da: libreoffice-common libreoffice-writer bo'lishi shart.
-    """
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = os.path.join(tmpdir, "resume.docx")
         pdf_path = os.path.join(tmpdir, "resume.pdf")
-
         with open(docx_path, "wb") as f:
             f.write(docx_bytes)
-
-        # --headless konvert
         subprocess.run(
             ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path],
             check=True
         )
-
         with open(pdf_path, "rb") as f:
             return f.read()
 
 # =========================
-# FORMA QABUL QILISH + FAYLLARNI YUBORISH
+# Form data qabul qilish
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
-    
     full_name: str = Form(...),
     phone: str = Form(...),
     tg_id: str = Form(...),
@@ -222,13 +220,18 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # relatives JSON
+    # relatives JSON parse
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
         rels = []
 
-    # docxtpl kontekst
+    # Template yo‘li
+    tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
+    if not os.path.exists(tpl_path):
+        return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
+
+    # DOCX render context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -251,45 +254,30 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # DOCX templatega yo'l
-    tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
-    if not os.path.exists(tpl_path):
-        return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=500)
-
-    # DOCX generatsiya
-    # DOCX generatsiya
+    # DOCX generatsiya + rasm ixtiyoriy
     doc = DocxTemplate(tpl_path)
 
-    # --- rasm bo'lmasa ham xotirjam ishlashi va DB uchun bytes saqlash ---
     raw_photo_bytes = None
     inline_img = None
-    if photo and getattr(photo, "filename", ""):
-        try:
+    try:
+        if photo is not None and getattr(photo, "filename", ""):
             img_bytes = await photo.read()
             if img_bytes:
-                raw_photo_bytes = img_bytes  # DB uchun saqlaymiz
+                raw_photo_bytes = img_bytes  # DB uchun saqlash
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
-        except Exception as e:
-            print("PHOTO ERROR:", repr(e), file=sys.stderr)
-            inline_img = None
+    except Exception as e:
+        print("PHOTO ERROR:", repr(e), file=sys.stderr)
+        inline_img = None
 
     ctx["photo"] = inline_img
 
-
+    # DOCX render & bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-
-    ctx["photo"] = inline_img
-
-    buf = io.BytesIO()
-    doc.render(ctx)
-    doc.save(buf)
-    docx_bytes = buf.getvalue()
-
-    # --- DB: saqlash ---
+    # --- DB saqlash (bor bo‘lsa) ---
     if AsyncSessionLocal:
         try:
             async with AsyncSessionLocal() as session:
@@ -315,7 +303,6 @@ async def send_resume_data(
                     work_experience=work_experience,
                     photo_bytes=raw_photo_bytes
                 )
-                # relatives listini qo‘shamiz
                 for r in rels:
                     sub.relatives.append(Relative(
                         relation_type=r.get("relation_type", ""),
@@ -329,13 +316,12 @@ async def send_resume_data(
         except Exception as e:
             print("DB SAVE ERROR:", repr(e), file=sys.stderr)
             traceback.print_exc()
-            # DB xatolik qilsa ham oqim to‘xtamasin
+            # DB xato bo‘lsa ham oqimni to‘xtatmaymiz
 
     # DOCX → PDF (LibreOffice)
     try:
         pdf_bytes = convert_docx_to_pdf(docx_bytes)
     except Exception as e:
-        # Agar PDF yiqilsa ham DOCX jo'natamiz; xatoni qaytaramiz
         print("=== DOCX->PDF ERROR ===", file=sys.stderr)
         print(repr(e), file=sys.stderr)
         traceback.print_exc()
@@ -346,77 +332,52 @@ async def send_resume_data(
     docx_name = f"{safe_name}_0.docx"
     pdf_name  = f"{safe_name}_0.pdf"
 
-       # Telegramga yuborish
+    # Telegramga yuborish (BufferedInputFile)
     try:
         chat_id = int(tg_id)
 
-        # DOCX (xotiradagi baytlar -> InputFile)
         docx_input = BufferedInputFile(docx_bytes, filename=docx_name)
-        await bot.send_document(
-            chat_id,
-            document=docx_input,
-            caption="✅ Word formatdagi rezyume"
-        )
+        await bot.send_document(chat_id, document=docx_input, caption="✅ Word formatdagi rezyume")
 
-        # PDF bo'lsa, uni ham yuboramiz
         if pdf_bytes:
             pdf_input = BufferedInputFile(pdf_bytes, filename=pdf_name)
-            await bot.send_document(
-                chat_id,
-                document=pdf_input,
-                caption="✅ PDF formatdagi rezyume"
-            )
+            await bot.send_document(chat_id, document=pdf_input, caption="✅ PDF formatdagi rezyume")
         else:
-            await bot.send_message(
-                chat_id,
-                "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi."
-            )
+            await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)})
-
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
 
     return {"status": "success"}
 
 # =========================
-# WEBHOOK (XAVFSIZ)
+# Telegram webhook
 # =========================
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
-    """
-    Telegram webhook qabul qiluvchi endpoint.
-    500 bo'lib navbat to'planmasligi uchun xatoda ham 200 qaytaramiz (ok=False).
-    """
     data = await request.json()
     try:
-        # Aiogram 3: agar feed_raw_update mavjud bo'lsa, uni ishlatamiz.
         if hasattr(dp, "feed_raw_update"):
-            await dp.feed_raw_update(bot, data)  # raw JSON
+            await dp.feed_raw_update(bot, data)
         else:
-            # Ba'zi versiyalarda raw mavjud bo'lmasligi mumkin:
             update = Update.model_validate(data)
             await dp.feed_update(bot, update)
         return {"ok": True}
     except Exception as e:
-        # Xatoni Railway loglariga chiqaramiz
         print("=== WEBHOOK ERROR ===", file=sys.stderr)
         print(repr(e), file=sys.stderr)
         traceback.print_exc()
         print("Update JSON:", data, file=sys.stderr)
-        # Baribir 200 qaytamiz — Telegram navbatni o‘tkazishi uchun
         return {"ok": False}
 
-# =========================
-# WEBHOOK O'RNATISH
-# =========================
 @app.get("/bot/set_webhook")
 async def set_webhook(base: str | None = None):
-    base_url = (base or APP_BASE).rstrip('/')   # <<— MUHIM
+    base_url = (base or APP_BASE).rstrip('/')
     await bot.set_webhook(f"{base_url}/bot/webhook")
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
 
 # =========================
-# DEBUG ENDPOINTLAR
+# Debug endpoints
 # =========================
 @app.get("/debug/ping")
 def debug_ping():
@@ -426,3 +387,14 @@ def debug_ping():
 async def debug_getme():
     me = await bot.get_me()
     return {"id": me.id, "username": me.username}
+
+@app.get("/debug/db_status")
+async def db_status():
+    if not AsyncSessionLocal:
+        return {"db": "disabled (DATABASE_URL yo‘q)"}
+    try:
+        async with AsyncSessionLocal() as s:
+            await s.execute(text("SELECT 1"))
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
