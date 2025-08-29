@@ -253,11 +253,7 @@ async def telegram_webhook(request: Request):
 # =========================
 @app.get("/bot/set_webhook")
 async def set_webhook(base: str | None = None):
-    """
-    Webhookni o'rnatish:
-    https://<DOMAIN>/bot/set_webhook?base=https://<DOMAIN>
-    """
-    base_url = base or APP_BASE
+    base_url = (base or APP_BASE).rstrip('/')   # <<— MUHIM
     await bot.set_webhook(f"{base_url}/bot/webhook")
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
 
