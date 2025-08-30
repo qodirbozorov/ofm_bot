@@ -47,14 +47,14 @@ async def start_cmd(m: Message):
         f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
         "/new_resume - Yangi obektivka\n"
         "/help - Yordam\n\n"
-        "@octagon_print"
+        "@O_P_admin"
     )
     await m.answer(text)
 
 
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
-    await m.answer("Savol bo‘lsa yozing: @octagon_print")
+    await m.answer("Savol bo‘lsa yozing: @O_P_admin")
 
 
 @dp.message(Command("new_resume"))
