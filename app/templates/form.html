@@ -15,6 +15,8 @@
       font-family: "Inter", sans-serif;
       font-optical-sizing: auto;
       font-style: normal;
+      background-color: #fefefe;
+      color: #222;
     }
 
     .section {
@@ -323,6 +325,11 @@
         const out = await res.json();
         if (out.status === "success") {
           alert("✅ Ma’lumotnoma tayyor.\n\n✅ Chatda yuborildi!");
+           setTimeout(() => {
+        if (window.Telegram && Telegram.WebApp) {
+          Telegram.WebApp.close();
+        }
+      }, 500);
           if (window.Telegram && Telegram.WebApp) { Telegram.WebApp.close(); }
         } else { alert("❌ Xatolik: " + out.error); }
       } catch (e) {
