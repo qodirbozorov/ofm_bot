@@ -52,6 +52,15 @@ async def set_commands():
     await bot.set_my_commands(commands)
 
 
+@app.on_event("startup")
+async def on_startup():
+    try:
+        await set_commands()
+        print("✅ Bot commands list yangilandi", file=sys.stderr)
+    except Exception as e:
+        print("❌ Commands set xato:", e, file=sys.stderr)
+
+
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
     ACTIVE_USERS.add(m.from_user.id)
