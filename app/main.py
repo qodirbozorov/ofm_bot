@@ -17,17 +17,16 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
 
-from aiogram import F  # filterlar uchun
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update,
-    BufferedInputFile,
+    BufferedInputFile, BotCommand
 )
 
 # =========================
-# KONFIG (env kerak emas)
+# KONFIG (env shart emas)
 # =========================
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"  # trailing slashsiz
@@ -40,28 +39,22 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 ACTIVE_USERS = set()
 
-from aiogram.types import BotCommand
-
-# ...
-
 async def set_commands():
     commands = [
-         BotCommand(command="start", description="Boshlash"),
-         BotCommand(command="new_resume", description="Yangi obyektivka"),
-         BotCommand(command="help", description="Yordam"),
-         BotCommand(command="convert", description="DOCX/PPTX/XLSX↔PDF, PPTX→PNG, PDF→DOCX/PPTX"),
-         BotCommand(command="pdf_split", description="PDF sahifalarni ajratish (caption)"),
-         BotCommand(command="pdf_merge", description="PDF fayllarni birlashtirish (sessiya)"),
-         BotCommand(command="pagenum", description="PDF sahifa raqamlari (caption)"),
-         BotCommand(command="watermark", description="PDF watermark (caption)"),
-         BotCommand(command="convert", description="DOCX/PPTX/XLSX→PDF yoki PPTX→PNG (caption)"),
-         BotCommand(command="ocr", description="Skan PDF → matn (caption)"),
-         BotCommand(command="translate", description="PDF matn tarjimasi (caption)"),
-         BotCommand(command="done", description="Merge sessiyasini yakunlash"),
+        BotCommand(command="start",       description="Boshlash"),
+        BotCommand(command="help",        description="Yordam"),
+        BotCommand(command="new_resume",  description="Yangi obyektivka"),
+
+        BotCommand(command="convert",     description="DOCX/PPTX/XLSX↔PDF, PPTX→PNG, PDF→DOCX/PPTX"),
+        BotCommand(command="pdf_split",   description="PDF sahifalarni ajratish (caption)"),
+        BotCommand(command="pdf_merge",   description="PDF fayllarni birlashtirish (sessiya)"),
+        BotCommand(command="pagenum",     description="PDF sahifalarga raqam qo‘shish (caption)"),
+        BotCommand(command="watermark",   description="PDF watermark (caption)"),
+        BotCommand(command="ocr",         description="Skan PDF → matn (caption)"),
+        BotCommand(command="translate",   description="PDF matn tarjimasi (caption)"),
+        BotCommand(command="done",        description="Merge sessiyasini yakunlash"),
     ]
     await bot.set_my_commands(commands)
-
-
 
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
@@ -70,167 +63,13 @@ async def start_cmd(m: Message):
         f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
         "/new_resume - Yangi obektivka\n"
         "/help - Yordam\n\n"
-        "@O_P_admin"
+        "@octagon_print"
     )
     await m.answer(text)
 
-# =========================
-# TOOLS: stateless caption-based komandalar
-# =========================
-
-# PDF SPLIT — Faylga caption: /pdf_split 1-3,7
-@dp.message(F.document, F.caption.regexp(r"^/pdf_split\s+(.+)$"))
-async def h_pdf_split(m: Message, regexp: re.Match):
-    ranges = regexp.group(1).strip()
-    if m.document.mime_type != "application/pdf":
-        return await m.answer("PDF yuboring va captionga: /pdf_split 1-3,7")
-    file = await bot.download(m.document)
-    out = pdf_split(file.read(), ranges)
-    await m.answer_document(BufferedInputFile(out, filename="split.pdf"))
-
-# PDF PAGES → raqamlash — caption: /pagenum [bottom-right|...]
-@dp.message(F.document, F.caption.regexp(r"^/pagenum(?:\s+(\S+))?$"))
-async def h_pagenum(m: Message, regexp: re.Match):
-    pos = (regexp.group(1) or "bottom-right").strip()
-    if m.document.mime_type != "application/pdf":
-        return await m.answer("PDF yuboring. Caption: /pagenum bottom-right")
-    file = await bot.download(m.document)
-    out = pdf_add_page_numbers(file.read(), position=pos)
-    await m.answer_document(BufferedInputFile(out, filename="pagenum.pdf"))
-
-# PDF WATERMARK — caption: /watermark Matn
-@dp.message(F.document, F.caption.regexp(r"^/watermark\s+(.+)$"))
-async def h_watermark(m: Message, regexp: re.Match):
-    text = regexp.group(1).strip()
-    if m.document.mime_type != "application/pdf":
-        return await m.answer("PDF yuboring. Caption: /watermark YOUR_TEXT")
-    file = await bot.download(m.document)
-    out = pdf_watermark(file.read(), text)
-    await m.answer_document(BufferedInputFile(out, filename="watermark.pdf"))
-
-# KONVERT — DOCX/PPTX/XLSX → PDF  |  PDF → PPTX (yo'q) | PPTX → PNG (ZIP)
-# caption: /convert pdf   (docx/pptx/xlsx uchun)
-#          /convert png   (faqat pptx uchun, ZIP qaytadi)
-@dp.message(F.document, F.caption.regexp(r"^/convert\s+(\S+)$"))
-# KONVERT — DOCX/PPTX/XLSX ↔ PDF  |  PPTX → PNG (ZIP)  |  PDF → DOCX/PPTX
-# Foydalanish:
-#   DOCX/PPTX/XLSX → PDF : faylga caption: /convert pdf
-#   PPTX → PNG (ZIP)     : faylga caption: /convert png
-#   PDF → DOCX           : faylga caption: /convert docx
-#   PDF → PPTX           : faylga caption: /convert pptx
-@dp.message(F.document, F.caption.regexp(r"^/convert\s+(\S+)$"))
-async def h_convert(m: Message, regexp: re.Match):
-    target = regexp.group(1).lower().strip()  # pdf | png | docx | pptx
-    name = (m.document.file_name or "").lower()
-    in_ext = os.path.splitext(name)[1]
-
-    # Yuklangan faylni o‘qiymiz
-    f = await bot.download(m.document)
-    data = f.read()
-
-    try:
-        # -------- DOCX/PPTX/XLSX → PDF --------
-        if target == "pdf" and in_ext in {".docx", ".pptx", ".xlsx"}:
-            out = soffice_convert(data, in_ext=in_ext, out_ext="pdf")
-            if not out:
-                return await m.answer("Konvert xatosi (LibreOffice).")
-            return await m.answer_document(BufferedInputFile(out, filename="converted.pdf"))
-
-        # -------- PPTX → PNG (ZIP) --------
-        if target == "png" and in_ext == ".pptx":
-            zip_bytes = soffice_convert(data, in_ext=".pptx", out_ext="png")
-            if not zip_bytes:
-                return await m.answer("PPTX → PNG eksport xatosi.")
-            return await m.answer_document(BufferedInputFile(zip_bytes, filename="slides_png.zip"))
-
-        # -------- PDF → DOCX/PPTX (best-effort, LO PDF import) --------
-        if in_ext == ".pdf" and target in {"docx", "pptx"}:
-            out = soffice_convert(data, in_ext=".pdf", out_ext=target)
-            if not out:
-                return await m.answer(f"PDF → {target.upper()} konvert xatosi.")
-            return await m.answer_document(BufferedInputFile(out, filename=f"converted.{target}"))
-
-        # -------- Noto‘g‘ri kombinatsiya --------
-        return await m.answer(
-            "Qo‘llanadigan kombinatsiyalar:\n"
-            "• DOCX/PPTX/XLSX → /convert pdf\n"
-            "• PPTX → /convert png (ZIP)\n"
-            "• PDF → /convert docx\n"
-            "• PDF → /convert pptx\n"
-            "❌ PDF → XLSX qo‘llab-quvvatlanmaydi\n"
-            "❌ Rasm ↔ Word hozircha o‘chirilgan"
-        )
-    except Exception as e:
-        await m.answer(f"Konvert xatosi: {e}")
-
-# OCR — caption: /ocr [lang]  (default: eng). Faqat PDF.
-@dp.message(F.document, F.caption.regexp(r"^/ocr(?:\s+(\S+))?$"))
-async def h_ocr(m: Message, regexp: re.Match):
-    lang = (regexp.group(1) or "eng").strip()
-    if m.document.mime_type != "application/pdf":
-        return await m.answer("PDF yuboring. Caption: /ocr [lang]\nMasalan: /ocr eng  yoki  /ocr rus")
-    file = await bot.download(m.document)
-    text = ocr_pdf_to_text(file.read(), lang=lang)
-    await m.answer_document(BufferedInputFile(text.encode("utf-8"), filename=f"ocr_{lang}.txt"))
-
-# TARJIMA — caption: /translate [uz|ru|en ...]  (PDF’dan matn o‘qib tarjima)
-@dp.message(F.document, F.caption.regexp(r"^/translate(?:\s+(\S+))?$"))
-async def h_translate(m: Message, regexp: re.Match):
-    dest = (regexp.group(1) or "uz").strip()
-    if m.document.mime_type != "application/pdf":
-        return await m.answer("PDF yuboring. Caption: /translate uz")
-    file = await bot.download(m.document)
-    text = extract_pdf_text(file.read())
-    tr = translate_text(text, dest=dest, src_lang="auto")
-    await m.answer_document(BufferedInputFile(tr.encode("utf-8"), filename=f"translated_{dest}.txt"))
-
-
-
-# =========================
-# PDF MERGE — sessiya (RAM)
-# /pdf_merge  -> sessiya boshlanadi
-# keyin bir nechta PDF yuboradi (captionsiz)
-# /done -> merge va natija
-# =========================
-import threading
-MERGE_BUCKET: dict[int, list[bytes]] = {}
-MERGE_LOCK = threading.Lock()
-
-@dp.message(Command("pdf_merge"))
-async def h_merge_start(m: Message):
-    with MERGE_LOCK:
-        MERGE_BUCKET[m.from_user.id] = []
-    await m.answer("Merge sessiya boshlandi.\nPDF fayllarni birma-bir yuboring (captionsiz).\nTugagach: /done deb yozing.")
-
-@dp.message(Command("done"))
-async def h_merge_done(m: Message):
-    with MERGE_LOCK:
-        parts = MERGE_BUCKET.pop(m.from_user.id, [])
-    if len(parts) < 2:
-        return await m.answer("Kamida 2 ta PDF yuboring.")
-    out = pdf_merge(parts)
-    await m.answer_document(BufferedInputFile(out, filename="merged.pdf"))
-
-@dp.message(F.document)
-async def h_merge_collect(m: Message):
-    # sessiya aktiv bo'lsa va PDF bo'lsa — yig'amiz
-    with MERGE_LOCK:
-        bucket = MERGE_BUCKET.get(m.from_user.id)
-    if bucket is None:
-        return  # boshqa handlerlar (split/ocr/...) allaqachon caption orqali ishlaydi
-    if m.document and m.document.mime_type == "application/pdf" and not (m.caption or "").startswith("/"):
-        f = await bot.download(m.document)
-        with MERGE_LOCK:
-            MERGE_BUCKET[m.from_user.id].append(f.read())
-        await m.reply("Qo‘shildi ✅")
-
-
-
-
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
-    await m.answer("Savol bo‘lsa yozing: @O_P_admin")
-
+    await m.answer("Savol bo‘lsa yozing: @octagon_print")
 
 @dp.message(Command("new_resume"))
 async def new_resume_cmd(m: Message):
@@ -248,39 +87,10 @@ async def new_resume_cmd(m: Message):
            "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
     await m.answer(txt, reply_markup=kb)
 
-
 # =========================
 # FASTAPI
 # =========================
 app = FastAPI()
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    # 500 o'rniga JSON qaytaramiz (web app alert uchun qulay)
-    print("=== GLOBAL ERROR ===", file=sys.stderr)
-    print(repr(exc), file=sys.stderr)
-    traceback.print_exc()
-    return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
-
-
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-env = Environment(
-    loader=FileSystemLoader(TEMPLATES_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
-)
-
-
-@app.get("/", response_class=PlainTextResponse)
-def root():
-    return "OK"
-
-
-@app.get("/form", response_class=HTMLResponse)
-def get_form(id: str = ""):
-    tpl = env.get_template("form.html")
-    return tpl.render(tg_id=id)
-
 
 @app.on_event("startup")
 async def on_startup():
@@ -290,9 +100,31 @@ async def on_startup():
     except Exception as e:
         print("❌ Commands set xato:", e, file=sys.stderr)
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    print("=== GLOBAL ERROR ===", file=sys.stderr)
+    print(repr(exc), file=sys.stderr)
+    traceback.print_exc()
+    # WebApp alert uchun 200 bilan JSON qaytaramiz
+    return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+
+@app.get("/", response_class=PlainTextResponse)
+def root():
+    return "OK"
+
+@app.get("/form", response_class=HTMLResponse)
+def get_form(id: str = ""):
+    tpl = env.get_template("form.html")
+    return tpl.render(tg_id=id)
 
 # =========================
-# YORDAMCHI: Fayl nomi generatori
+# YORDAMCHI: nomlash va rasm ext
 # =========================
 def make_safe_basename(full_name: str, phone: str) -> str:
     base = "_".join((full_name or "user").strip().split())
@@ -301,46 +133,25 @@ def make_safe_basename(full_name: str, phone: str) -> str:
     dm = datetime.utcnow().strftime("%d-%m")
     return f"{base}_{ph}_{dm}".lower()
 
-
 def pick_image_ext(upload_name: str | None) -> str:
     ext = (os.path.splitext(upload_name or "")[1] or "").lower()
     if ext in {".jpg", ".jpeg", ".png", ".webp"}:
         return ext
     return ".png"
 
-
 # =========================
-# DOCX -> PDF (LibreOffice)
-# =========================
-def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        docx_path = os.path.join(tmpdir, "resume.docx")
-        pdf_path = os.path.join(tmpdir, "resume.pdf")
-        with open(docx_path, "wb") as f:
-            f.write(docx_bytes)
-        try:
-            subprocess.run(
-                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path],
-                check=True
-            )
-            with open(pdf_path, "rb") as f:
-                return f.read()
-        except Exception as e:
-            print("DOCX->PDF ERROR:", repr(e), file=sys.stderr)
-            traceback.print_exc()
-            return None
-
-# =========================
-# GENERIC: LibreOffice konvert yordamchisi
+# LibreOffice konvert
 # =========================
 def soffice_convert(src_bytes: bytes, in_ext: str, out_ext: str) -> Optional[bytes]:
     """
-    .docx/.pptx/.xlsx -> .pdf | .png (pptx->png har slayd alohida fayl bo'ladi)
-    yoki pdf->images uchun poppler ishlatiladi. Bu funksiya LO orqali 1:1 convert qiladi.
+    LO orqali umumiy konvert:
+      - * -> pdf/docx/pptx/xlsx => bitta chiqish fayl
+      - pptx -> png => ko'p fayl (zip qilib qaytaramiz)
     """
     with tempfile.TemporaryDirectory() as td:
         inp = os.path.join(td, f"in{in_ext}")
-        with open(inp, "wb") as f: f.write(src_bytes)
+        with open(inp, "wb") as f:
+            f.write(src_bytes)
         try:
             subprocess.run(
                 ["soffice", "--headless", "--convert-to", out_ext, "--outdir", td, inp],
@@ -348,39 +159,41 @@ def soffice_convert(src_bytes: bytes, in_ext: str, out_ext: str) -> Optional[byt
             )
         except Exception as e:
             print("SOFFICE CONVERT ERROR:", repr(e), file=sys.stderr)
+            traceback.print_exc()
             return None
 
-        # LibreOffice output nomlash siyosati: asosan "in.<ext>"
-        # .pdf holatida odatda "in.pdf", .png bo'lsa "in-1.png, in-2.png, ..."
-        if out_ext == "pdf":
-            out_path = os.path.join(td, "in.pdf")
+        if out_ext in {"pdf", "docx", "pptx", "xlsx"}:
+            out_path = os.path.join(td, f"in.{out_ext}")
             if not os.path.exists(out_path):
-                # ba'zi LO versiyalarda nomi "in (converted).pdf" bo'lishi mumkin - safety:
+                # ba'zi LO versiyalarda nomi boshqacha bo‘lishi mumkin — ehtiyot chorasi:
                 for name in os.listdir(td):
-                    if name.lower().endswith(".pdf"):
-                        out_path = os.path.join(td, name); break
+                    if name.lower().endswith(f".{out_ext}"):
+                        out_path = os.path.join(td, name)
+                        break
             if os.path.exists(out_path):
                 return open(out_path, "rb").read()
             return None
-        elif out_ext == "png":
-            # pnglar ro'yxatini ZIP qilib qaytaramiz (handler ichida yuboramiz)
-            # bu funksiya faqat fayl nomlarini qaytaradi (quyi handler ziplaydi)
-            files = sorted([os.path.join(td, x) for x in os.listdir(td) if x.lower().endswith(".png")])
+
+        if out_ext == "png":
+            files = sorted(
+                os.path.join(td, x) for x in os.listdir(td) if x.lower().endswith(".png")
+            )
             if not files:
                 return None
-            # ZIP’ni RAM’da yasaymiz
             import zipfile
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
                 for i, p in enumerate(files, 1):
                     z.write(p, arcname=f"slide-{i}.png")
             return buf.getvalue()
-        else:
-            return None
 
+        return None
+
+def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
+    return soffice_convert(docx_bytes, in_ext=".docx", out_ext="pdf")
 
 # =========================
-# PDF OPS: split / merge / page numbers / watermark
+# PDF OPS: split / merge / pagenum / watermark
 # =========================
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -452,7 +265,7 @@ def pdf_add_page_numbers(src: bytes, position: str="bottom-right") -> bytes:
         p.merge_page(n.pages[0]); w.add_page(p)
     buf = io.BytesIO(); w.write(buf); return buf.getvalue()
 
-def pdf_watermark(src: bytes, text: str, opacity: float=0.15) -> bytes:
+def pdf_watermark(src: bytes, text: str) -> bytes:
     r = PdfReader(io.BytesIO(src)); w = PdfWriter()
     p0 = r.pages[0]; pw = float(p0.mediabox.width); ph = float(p0.mediabox.height)
     lay = io.BytesIO(); c = canvas.Canvas(lay, pagesize=(pw, ph))
@@ -462,7 +275,6 @@ def pdf_watermark(src: bytes, text: str, opacity: float=0.15) -> bytes:
     except:
         c.setFont("Helvetica", 48)
     c.saveState(); c.translate(pw/2, ph/2); c.rotate(45)
-    # alpha ni reportlab-da to‘liq boshqarish cheklangan; rang/gray bilan yengil yechim
     c.setFillGray(0.2)
     c.drawCentredString(0, 0, text)
     c.restoreState(); c.save(); lay.seek(0)
@@ -471,16 +283,15 @@ def pdf_watermark(src: bytes, text: str, opacity: float=0.15) -> bytes:
         page = r.pages[i]; page.merge_page(wm.pages[0]); w.add_page(page)
     buf = io.BytesIO(); w.write(buf); return buf.getvalue()
 
-
 # =========================
-# OCR va TEZKOR TARJIMA
+# OCR va TARJIMA
 # =========================
 import pytesseract
 from pdf2image import convert_from_bytes
 import fitz  # PyMuPDF
+from deep_translator import GoogleTranslator
 
 def ocr_pdf_to_text(src: bytes, lang: str="eng") -> str:
-    # poppler-utils kerak (pdftoppm)
     imgs = convert_from_bytes(src, dpi=220)
     outs = []
     for im in imgs:
@@ -494,12 +305,9 @@ def extract_pdf_text(src: bytes) -> str:
         out.append(p.get_text("text"))
     return "\n".join(out)
 
-from deep_translator import GoogleTranslator
 def translate_text(text: str, dest: str="uz", src_lang: str="auto") -> str:
     gt = GoogleTranslator(source=src_lang, target=dest)
     return gt.translate(text)
-
-
 
 # =========================
 # FORMA QABUL QILISH (DB yo‘q)
@@ -528,18 +336,18 @@ async def send_resume_data(
     relatives: str = Form("[]"),
     photo: UploadFile | None = None,
 ):
-    # 1) relatives JSON
+    # relatives JSON
     try:
         rels = json.loads(relatives) if relatives else []
     except Exception:
         rels = []
 
-    # 2) template tekshir
+    # template tekshir
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # 3) context
+    # context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -562,7 +370,7 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # 4) DOCX render + rasm (ixtiyoriy)
+    # DOCX render + rasm (ixtiyoriy)
     doc = DocxTemplate(tpl_path)
     inline_img = None
     img = None  # guruhga file sifatida yuborish uchun
@@ -578,33 +386,30 @@ async def send_resume_data(
 
     ctx["photo"] = inline_img
 
-    # 5) DOCX bytes
+    # DOCX bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-    # 6) PDF bytes
+    # PDF bytes
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # 7) nomlar
+    # nomlar
     base_name = make_safe_basename(full_name, phone)
     docx_name = f"{base_name}_0.docx"
-    pdf_name = f"{base_name}_0.pdf"
-    img_name = f"{base_name}{img_ext}"
+    pdf_name  = f"{base_name}_0.pdf"
+    img_name  = f"{base_name}{img_ext}"
     json_name = f"{base_name}.json"
 
-    # 8) GURUHGA: rasmni ham, jsonni ham FILE (document) sifatida yuboramiz
+    # GURUHGA: rasm + json
     try:
-        # a) rasm (agar bor bo'lsa) — document ko'rinishida (filename saqlanadi)
         if img:
             await bot.send_document(
                 GROUP_CHAT_ID,
                 BufferedInputFile(img, filename=img_name),
                 caption=f"🆕 Yangi forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
             )
-
-        # b) json — alohida document
         payload = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "tg_id": tg_id,
@@ -638,7 +443,7 @@ async def send_resume_data(
         print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
 
-    # 9) MIJOZGA: DOCX + PDF
+    # MIJOZGA: DOCX + PDF
     try:
         chat_id = int(tg_id)
         await bot.send_document(
@@ -659,6 +464,137 @@ async def send_resume_data(
 
     return {"status": "success"}
 
+# =========================
+# TOOLS: caption-based komandalar
+# =========================
+
+# PDF SPLIT — caption: /pdf_split 1-3,7
+@dp.message(F.document, F.caption.regexp(r"^/pdf_split\s+(.+)$"))
+async def h_pdf_split(m: Message, regexp: re.Match):
+    ranges = regexp.group(1).strip()
+    if m.document.mime_type != "application/pdf":
+        return await m.answer("PDF yuboring va captionga: /pdf_split 1-3,7")
+    file = await bot.download(m.document)
+    out = pdf_split(file.read(), ranges)
+    await m.answer_document(BufferedInputFile(out, filename="split.pdf"))
+
+# PDF PAGES → raqamlash — caption: /pagenum [pos]
+@dp.message(F.document, F.caption.regexp(r"^/pagenum(?:\s+(\S+))?$"))
+async def h_pagenum(m: Message, regexp: re.Match):
+    pos = (regexp.group(1) or "bottom-right").strip()
+    if m.document.mime_type != "application/pdf":
+        return await m.answer("PDF yuboring. Caption: /pagenum bottom-right")
+    file = await bot.download(m.document)
+    out = pdf_add_page_numbers(file.read(), position=pos)
+    await m.answer_document(BufferedInputFile(out, filename="pagenum.pdf"))
+
+# PDF WATERMARK — caption: /watermark Matn
+@dp.message(F.document, F.caption.regexp(r"^/watermark\s+(.+)$"))
+async def h_watermark(m: Message, regexp: re.Match):
+    text = regexp.group(1).strip()
+    if m.document.mime_type != "application/pdf":
+        return await m.answer("PDF yuboring. Caption: /watermark YOUR_TEXT")
+    file = await bot.download(m.document)
+    out = pdf_watermark(file.read(), text)
+    await m.answer_document(BufferedInputFile(out, filename="watermark.pdf"))
+
+# KONVERT — DOCX/PPTX/XLSX ↔ PDF | PPTX → PNG | PDF → DOCX/PPTX
+# caption: /convert pdf | png | docx | pptx
+@dp.message(F.document, F.caption.regexp(r"^/convert\s+(\S+)$"))
+async def h_convert(m: Message, regexp: re.Match):
+    target = regexp.group(1).lower().strip()  # pdf | png | docx | pptx
+    name = (m.document.file_name or "").lower()
+    in_ext = os.path.splitext(name)[1]
+
+    f = await bot.download(m.document)
+    data = f.read()
+
+    try:
+        # DOCX/PPTX/XLSX → PDF
+        if target == "pdf" and in_ext in {".docx", ".pptx", ".xlsx"}:
+            out = soffice_convert(data, in_ext=in_ext, out_ext="pdf")
+            if not out:
+                return await m.answer("Konvert xatosi (LibreOffice).")
+            return await m.answer_document(BufferedInputFile(out, filename="converted.pdf"))
+
+        # PPTX → PNG (ZIP)
+        if target == "png" and in_ext == ".pptx":
+            zip_bytes = soffice_convert(data, in_ext=".pptx", out_ext="png")
+            if not zip_bytes:
+                return await m.answer("PPTX → PNG eksport xatosi.")
+            return await m.answer_document(BufferedInputFile(zip_bytes, filename="slides_png.zip"))
+
+        # PDF → DOCX/PPTX
+        if in_ext == ".pdf" and target in {"docx", "pptx"}:
+            out = soffice_convert(data, in_ext=".pdf", out_ext=target)
+            if not out:
+                return await m.answer(f"PDF → {target.upper()} konvert xatosi.")
+            return await m.answer_document(BufferedInputFile(out, filename=f"converted.{target}"))
+
+        return await m.answer(
+            "Qo‘llanadigan kombinatsiyalar:\n"
+            "• DOCX/PPTX/XLSX → /convert pdf\n"
+            "• PPTX → /convert png (ZIP)\n"
+            "• PDF → /convert docx\n"
+            "• PDF → /convert pptx"
+        )
+    except Exception as e:
+        await m.answer(f"Konvert xatosi: {e}")
+
+# OCR — caption: /ocr [lang]  (default: eng). Faqat PDF.
+@dp.message(F.document, F.caption.regexp(r"^/ocr(?:\s+(\S+))?$"))
+async def h_ocr(m: Message, regexp: re.Match):
+    lang = (regexp.group(1) or "eng").strip()
+    if m.document.mime_type != "application/pdf":
+        return await m.answer("PDF yuboring. Caption: /ocr [lang] (mas: /ocr eng)")
+    file = await bot.download(m.document)
+    text = ocr_pdf_to_text(file.read(), lang=lang)
+    await m.answer_document(BufferedInputFile(text.encode("utf-8"), filename=f"ocr_{lang}.txt"))
+
+# TARJIMA — caption: /translate [uz|ru|en ...]  (PDF matnini o‘qib tarjima)
+@dp.message(F.document, F.caption.regexp(r"^/translate(?:\s+(\S+))?$"))
+async def h_translate(m: Message, regexp: re.Match):
+    dest = (regexp.group(1) or "uz").strip()
+    if m.document.mime_type != "application/pdf":
+        return await m.answer("PDF yuboring. Caption: /translate uz")
+    file = await bot.download(m.document)
+    text = extract_pdf_text(file.read())
+    tr = translate_text(text, dest=dest, src_lang="auto")
+    await m.answer_document(BufferedInputFile(tr.encode("utf-8"), filename=f"translated_{dest}.txt"))
+
+# =========================
+# PDF MERGE sessiya (RAM)
+# =========================
+import threading
+MERGE_BUCKET: dict[int, list[bytes]] = {}
+MERGE_LOCK = threading.Lock()
+
+@dp.message(Command("pdf_merge"))
+async def h_merge_start(m: Message):
+    with MERGE_LOCK:
+        MERGE_BUCKET[m.from_user.id] = []
+    await m.answer("Merge sessiya boshlandi.\nPDF fayllarni ketma-ket yuboring (captionsiz).\nTugagach: /done")
+
+@dp.message(Command("done"))
+async def h_merge_done(m: Message):
+    with MERGE_LOCK:
+        parts = MERGE_BUCKET.pop(m.from_user.id, [])
+    if len(parts) < 2:
+        return await m.answer("Kamida 2 ta PDF yuboring.")
+    out = pdf_merge(parts)
+    await m.answer_document(BufferedInputFile(out, filename="merged.pdf"))
+
+@dp.message(F.document)
+async def h_merge_collect(m: Message):
+    with MERGE_LOCK:
+        bucket = MERGE_BUCKET.get(m.from_user.id)
+    if bucket is None:
+        return
+    if m.document and m.document.mime_type == "application/pdf" and not (m.caption or "").startswith("/"):
+        f = await bot.download(m.document)
+        with MERGE_LOCK:
+            MERGE_BUCKET[m.from_user.id].append(f.read())
+        await m.reply("Qo‘shildi ✅")
 
 # =========================
 # WEBHOOK
@@ -680,13 +616,11 @@ async def telegram_webhook(request: Request):
         print("Update JSON:", data, file=sys.stderr)
         return {"ok": False}
 
-
 @app.get("/bot/set_webhook")
 async def set_webhook(base: str | None = None):
     base_url = (base or APP_BASE).rstrip("/")
     await bot.set_webhook(f"{base_url}/bot/webhook")
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
-
 
 # =========================
 # DEBUG
@@ -695,8 +629,12 @@ async def set_webhook(base: str | None = None):
 def debug_ping():
     return {"status": "ok"}
 
-
 @app.get("/debug/getme")
 async def debug_getme():
     me = await bot.get_me()
     return {"id": me.id, "username": me.username}
+
+@app.get("/debug/refresh_commands")
+async def refresh_commands():
+    await set_commands()
+    return {"ok": True}
