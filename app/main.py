@@ -703,115 +703,119 @@ async def sess_status(m: Message):
 # =========================
 # SESSION: Parametr komandalar
 # =========================
-@dp.message(F.text.regexp(r"^/range\s+(.+)$"))
-async def param_range(m: Message, regexp: re.Match):
+# =========================
+# SESSION: Parametr komandalar (versiya-agnostik)
+# =========================
+# Kompilyatsiyalangan regexlar (tezroq va qulay)
+RE_RANGE  = re.compile(r"^/range\s+(.+)$")
+RE_POS    = re.compile(r"^/pos\s+(\S+)$")
+RE_WM     = re.compile(r"^/wm\s+(.+)$")
+RE_TARGET = re.compile(r"^/target\s+(\S+)$")
+RE_LANG   = re.compile(r"^/lang\s+(\S+)$")
+RE_TO     = re.compile(r"^/to\s+(\S+)$")
+RE_MISS   = re.compile(r"^/(range|pos|wm|target|lang|to)\s*$")
+
+def _get_match(message: Message, data: dict, pattern: re.Pattern) -> re.Match | None:
+    """
+    Aiogram 3 minor versiyalaridagi nomlar farqi (`regexp` vs `match`)ni yopish.
+    Agar middleware hech narsa uzatmasa, o‘zimiz regex bilan tekshiramiz.
+    """
+    mobj = data.get("regexp") or data.get("match")
+    if mobj:
+        return mobj
+    text = (message.text or "").strip()
+    return pattern.match(text)
+
+@dp.message(F.text.regexp(RE_RANGE))
+async def param_range(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "split":
         return await m.answer("Bu parametr faqat /pdf_split sessiyasida ishlaydi.")
-    s["params"]["range"] = regexp.group(1).strip()
+    mobj = _get_match(m, data, RE_RANGE)
+    if not mobj:
+        return await m.answer("Oraliq formati: /range 1-3,7")
+    s["params"]["range"] = mobj.group(1).strip()
     await m.answer("✅ Oraliq qabul qilindi. /status yoki /done")
 
-
-@dp.message(F.text.regexp(r"^/pos\s+(\S+)$"))
-async def param_pos(m: Message, regexp: re.Match):
+@dp.message(F.text.regexp(RE_POS))
+async def param_pos(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "pagenum":
         return await m.answer("Bu parametr faqat /pagenum sessiyasida ishlaydi.")
-    pos = regexp.group(1).strip().lower()
-    allowed = {"bottom-right", "bottom-left", "bottom-center", "top-right", "top-left", "top-center"}
+    mobj = _get_match(m, data, RE_POS)
+    if not mobj:
+        return await m.answer("Pozitsiya formati: /pos bottom-right")
+    pos = mobj.group(1).strip().lower()
+    allowed = {"bottom-right","bottom-left","bottom-center","top-right","top-left","top-center"}
     if pos not in allowed:
         return await m.answer("Noto‘g‘ri pozitsiya. Ruxsat etilganlar: " + ", ".join(sorted(allowed)))
     s["params"]["pos"] = pos
     await m.answer("✅ Joylashuv qabul qilindi. /status yoki /done")
 
-
-@dp.message(F.text.regexp(r"^/wm\s+(.+)$"))
-async def param_wm(m: Message, regexp: re.Match):
+@dp.message(F.text.regexp(RE_WM))
+async def param_wm(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "watermark":
         return await m.answer("Bu parametr faqat /watermark sessiyasida ishlaydi.")
-    text = regexp.group(1).strip()
+    mobj = _get_match(m, data, RE_WM)
+    if not mobj:
+        return await m.answer("Matn formati: /wm Confidential")
+    text = mobj.group(1).strip()
     if not text:
         return await m.answer("Matn bo‘sh bo‘lmasin.")
     s["params"]["wm"] = text[:100]
     await m.answer("✅ Watermark matni qabul qilindi. /status yoki /done")
 
-
-@dp.message(F.text.regexp(r"^/target\s+(\S+)$"))
-async def param_target(m: Message, regexp: re.Match):
+@dp.message(F.text.regexp(RE_TARGET))
+async def param_target(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "convert":
         return await m.answer("Bu parametr faqat /convert sessiyasida ishlaydi.")
-    target = regexp.group(1).strip().lower()
-    if target not in {"pdf", "png", "docx", "pptx"}:
+    mobj = _get_match(m, data, RE_TARGET)
+    if not mobj:
+        return await m.answer("Maqsad format: /target pdf | png | docx | pptx")
+    target = mobj.group(1).strip().lower()
+    if target not in {"pdf","png","docx","pptx"}:
         return await m.answer("Maqsad format: pdf | png | docx | pptx")
     s["params"]["target"] = target
     await m.answer("✅ Maqsad format qabul qilindi. /status yoki /done")
 
-
-@dp.message(F.text.regexp(r"^/lang\s+(\S+)$"))
-async def param_lang(m: Message, regexp: re.Match):
+@dp.message(F.text.regexp(RE_LANG))
+async def param_lang(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "ocr":
         return await m.answer("Bu parametr faqat /ocr sessiyasida ishlaydi.")
-    s["params"]["lang"] = regexp.group(1).strip()
+    mobj = _get_match(m, data, RE_LANG)
+    if not mobj:
+        return await m.answer("Til formati: /lang eng")
+    s["params"]["lang"] = mobj.group(1).strip()
     await m.answer("✅ Til qabul qilindi. /status yoki /done")
 
-
-@dp.message(F.text.regexp(r"^/to\s+(\S+)$"))
-async def param_to(m: Message, regexp: re.Match):
+@dp.message(F.text.regexp(RE_TO))
+async def param_to(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "translate":
         return await m.answer("Bu parametr faqat /translate sessiyasida ishlaydi.")
-    s["params"]["to"] = regexp.group(1).strip()
+    mobj = _get_match(m, data, RE_TO)
+    if not mobj:
+        return await m.answer("Maqsad til formati: /to uz")
+    s["params"]["to"] = mobj.group(1).strip()
     await m.answer("✅ Maqsad til qabul qilindi. /status yoki /done")
 
-
-# Parametrsiz yuborilganda ko‘rsatma berish (qulaylik uchun)
-@dp.message(F.text.regexp(r"^/(range|pos|wm|target|lang|to)\s*$"))
-async def param_missing(m: Message, regexp: re.Match):
-    cmd = regexp.group(1)
+# Parametrsiz yuborilganda foydalanuvchiga prompt
+@dp.message(F.text.regexp(RE_MISS))
+async def param_missing(m: Message, **data):
+    mobj = _get_match(m, data, RE_MISS)
+    cmd = mobj.group(1) if mobj else ""
     examples = {
-        "range": "Masalan: /range 1-3,7",
-        "pos": "Masalan: /pos bottom-right",
-        "wm": "Masalan: /wm Confidential",
+        "range":  "Masalan: /range 1-3,7",
+        "pos":    "Masalan: /pos bottom-right",
+        "wm":     "Masalan: /wm Confidential",
         "target": "Masalan: /target pdf | png | docx | pptx",
-        "lang": "Masalan: /lang eng",
-        "to": "Masalan: /to uz",
+        "lang":   "Masalan: /lang eng",
+        "to":     "Masalan: /to uz",
     }
     await m.answer(f"Parametr yetishmayapti. {examples.get(cmd, '')}")
-
-
-# =========================
-# SESSION: Fayl qabul qilish
-# =========================
-@dp.message(F.document)
-async def collect_file(m: Message):
-    s = get_session(m.from_user.id)
-    if not s:
-        return  # session yo‘q — jim
-
-    # faylni yuklab olamiz
-    file_io = await bot.download(m.document)
-    data = file_io.read()
-    name = m.document.file_name or "file.bin"
-    mime = m.document.mime_type or "application/octet-stream"
-
-    op = s["op"]
-    if op == "merge":
-        if mime != "application/pdf":
-            return await m.reply("Faqat PDF qabul qilinadi.")
-        s["files"].append({"name": name, "bytes": data, "mime": mime})
-        return await m.reply(f"Qo‘shildi ✅  ({name})  — jami: {len(s['files'])}")
-
-    if op in {"split", "pagenum", "watermark", "ocr", "translate", "convert"}:
-        # bitta fayl dolzarb — eski faylni almashtiramiz
-        s["files"] = [{"name": name, "bytes": data, "mime": mime}]
-
-        if op in {"split", "pagenum", "watermark", "ocr", "translate"} and mime != "application/pdf":
-            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi. Boshqa fayl yuboring yoki /cancel.")
-        await m.reply(f"Fayl qabul qilindi: {name} ✅  (/status yoki parametr yuboring, keyin /done)")
-        return
 
 
 # =========================
