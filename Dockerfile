@@ -5,8 +5,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System deps: LibreOffice + OCR + Poppler + fonts (eng yengil to'plam)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-common libreoffice-writer libreoffice-impress libreoffice-calc \
-    poppler-utils \            # pdf2image (pdftoppm) uchun
-    tesseract-ocr \            # OCR dvigatel
+    poppler-utils \            
+    tesseract-ocr \           
     fontconfig fonts-dejavu-core \
  && fc-cache -f -v || true \
  && rm -rf /var/lib/apt/lists/*
