@@ -703,7 +703,6 @@ async def sess_status(m: Message):
 # =========================
 # SESSION: Parametr komandalar
 # =========================
-# =========================
 # SESSION: Parametr komandalar (versiya-agnostik)
 # =========================
 # Kompilyatsiyalangan regexlar (tezroq va qulay)
