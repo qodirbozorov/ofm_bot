@@ -2,138 +2,104 @@
 import os
 import io
 import re
-import json
 import sys
-import subprocess
+import json
+import math
+import time
 import tempfile
 import traceback
-import threading
-from typing import Optional, Literal
+import subprocess
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+# ---- DOCX template
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
 
+# ---- Telegram
 from aiogram import Bot, Dispatcher, F
+from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
+                           WebAppInfo, Update, BotCommand, BufferedInputFile)
 from aiogram.filters import Command
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Update,
-    BufferedInputFile, BotCommand
-)
+
+# ---- PDF & OCR & Convert helpers
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+
+from pdf2image import convert_from_bytes
+import pytesseract
+
+# (ixtiyoriy onlayn tarjima – bo‘lmasa ham bot ishlayveradi)
+try:
+    from googletrans import Translator
+except Exception:
+    Translator = None
+
 
 # =========================
-# KONFIG (env shart emas)
+# CONFIG: Token/Domain/Group
 # =========================
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
-APP_BASE = "https://ofmbot-production.up.railway.app"  # trailing slashsiz
-GROUP_CHAT_ID = -1003046464831  # ma'lumot jo'natiladigan guruh
+APP_BASE = "https://ofmbot-production.up.railway.app"   # trailing slashsiz
+GROUP_CHAT_ID = -1003046464831
 
 # =========================
-# AIROGRAM
+# Aiogram
 # =========================
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
+
 ACTIVE_USERS = set()
 
-
-async def set_commands():
-    """Telegram 'menu' buyruqlarini ko‘rsatish."""
-    commands = [
-        BotCommand(command="start",       description="Boshlash"),
-        BotCommand(command="help",        description="Yordam"),
-        BotCommand(command="new_resume",  description="Yangi obyektivka"),
-
-        # Session-based asboblar:
-        BotCommand(command="pdf_split",   description="PDF ajratish (session)"),
-        BotCommand(command="pdf_merge",   description="PDF birlashtirish (session)"),
-        BotCommand(command="pagenum",     description="PDF sahifa raqami (session)"),
-        BotCommand(command="watermark",   description="PDF watermark (session)"),
-        BotCommand(command="convert",     description="DOCX/PPTX/XLSX↔PDF | PPTX→PNG | PDF→DOCX/PPTX"),
-        BotCommand(command="ocr",         description="Skan PDF → matn (session)"),
-        BotCommand(command="translate",   description="PDF matn tarjimasi (session)"),
-
-        BotCommand(command="status",      description="Session holati"),
-        BotCommand(command="cancel",      description="Sessionni bekor qilish"),
-        BotCommand(command="done",        description="Sessionni yakunlash"),
-    ]
-    await bot.set_my_commands(commands)
+# -------------------------
+# Sessiya saqlash (RAM)
+# -------------------------
+# {user_id: {"op": str, "files": [{"name":..., "bytes":..., "mime":...}], "params": {}}}
+SESS: Dict[int, Dict[str, Any]] = {}
 
 
-@dp.message(Command("start"))
-async def start_cmd(m: Message):
-    ACTIVE_USERS.add(m.from_user.id)
-    text = (
-        f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
-        "/new_resume - Yangi obektivka\n"
-        "/help - Yordam\n\n"
-        "@octagon_print"
-    )
-    await m.answer(text)
+def get_session(uid: int) -> Optional[Dict[str, Any]]:
+    return SESS.get(uid)
 
 
-@dp.message(Command("help"))
-async def help_cmd(m: Message):
-    await m.answer(
-        "Session uslubi:\n"
-        "1) /pdf_split | /pdf_merge | /pagenum | /watermark | /convert | /ocr | /translate\n"
-        "2) Fayl(lar)ni yuborasiz (ko‘rsatmaga qarang)\n"
-        "3) Parametrlar (kerak bo‘lsa): /range, /pos, /wm, /target, /lang, /to\n"
-        "4) /done — natijani olish\n"
-        "❌ Bekor: /cancel | ℹ️ Holat: /status"
-    )
+def new_session(uid: int, op: str):
+    SESS[uid] = {"op": op, "files": [], "params": {}}
 
 
-@dp.message(Command("new_resume"))
-async def new_resume_cmd(m: Message):
-    base = (APP_BASE or "").rstrip("/")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="Obyektivkani to‘ldirish",
-                web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
-            )
-        ]]
-    )
-    txt = ("👋 Assalomu alaykum!\n📄 Obyektivka (ma’lumotnoma)\n"
-           "✅ Tez\n✅ Oson\n✅ Ishonchli\n"
-           "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
-    await m.answer(txt, reply_markup=kb)
+def clear_session(uid: int):
+    SESS.pop(uid, None)
+
+
+def human_size(n: int) -> str:
+    if n < 1024: return f"{n} B"
+    if n < 1024**2: return f"{n/1024:.1f} KB"
+    if n < 1024**3: return f"{n/1024**2:.1f} MB"
+    return f"{n/1024**3:.1f} GB"
 
 
 # =========================
-# FASTAPI
+# FASTAPI app & templates
 # =========================
 app = FastAPI()
 
-
-@app.on_event("startup")
-async def on_startup():
-    try:
-        await set_commands()
-        print("✅ Bot commands list yangilandi", file=sys.stderr)
-    except Exception as e:
-        print("❌ Commands set xato:", e, file=sys.stderr)
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(loader=FileSystemLoader(TEMPLATES_DIR),
+                  autoescape=select_autoescape(["html", "xml"]))
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    # WebApp uchun 500 o‘rniga 200 qaytaramiz
     print("=== GLOBAL ERROR ===", file=sys.stderr)
     print(repr(exc), file=sys.stderr)
     traceback.print_exc()
+    # Frontdagi JS uchun 200 qaytaramiz (alert chiqishi uchun)
     return JSONResponse({"status": "error", "error": str(exc)}, status_code=200)
-
-
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-env = Environment(
-    loader=FileSystemLoader(TEMPLATES_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
-)
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -148,7 +114,7 @@ def get_form(id: str = ""):
 
 
 # =========================
-# YORDAMCHI: nomlash va rasm ext
+# Utilities
 # =========================
 def make_safe_basename(full_name: str, phone: str) -> str:
     base = "_".join((full_name or "user").strip().split())
@@ -165,241 +131,191 @@ def pick_image_ext(upload_name: str | None) -> str:
     return ".png"
 
 
-# =========================
-# LibreOffice konvert
-# =========================
-def soffice_convert(src_bytes: bytes, in_ext: str, out_ext: str) -> Optional[bytes]:
-    """
-    LibreOffice orqali umumiy konvert:
-      - * -> pdf/docx/pptx/xlsx => bitta chiqish fayl
-      - pptx -> png => bir nechta PNG (ZIP’da qaytaramiz)
-    """
-    with tempfile.TemporaryDirectory() as td:
-        inp = os.path.join(td, f"in{in_ext}")
-        with open(inp, "wb") as f:
-            f.write(src_bytes)
-
+def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
+    """LibreOffice orqali DOCX -> PDF"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        docx_path = os.path.join(tmpdir, "in.docx")
+        pdf_path = os.path.join(tmpdir, "in.pdf")
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
         try:
             subprocess.run(
-                ["soffice", "--headless", "--convert-to", out_ext, "--outdir", td, inp],
+                ["soffice", "--headless", "--convert-to", "pdf",
+                 "--outdir", tmpdir, docx_path],
                 check=True
             )
+            with open(pdf_path, "rb") as f:
+                return f.read()
         except Exception as e:
-            print("SOFFICE CONVERT ERROR:", repr(e), file=sys.stderr)
+            print("DOCX->PDF ERROR:", repr(e), file=sys.stderr)
             traceback.print_exc()
             return None
 
-        if out_ext in {"pdf", "docx", "pptx", "xlsx"}:
-            # odatda nomi "in.pdf" bo‘ladi, ammo LO ba’zan asl nomni saqlashi mumkin
-            out_path = os.path.join(td, f"in.{out_ext}")
-            if not os.path.exists(out_path):
-                for name in os.listdir(td):
-                    if name.lower().endswith(f".{out_ext}"):
-                        out_path = os.path.join(td, name)
-                        break
-            return open(out_path, "rb").read() if os.path.exists(out_path) else None
 
-        if out_ext == "png":
-            files = sorted(
-                os.path.join(td, x) for x in os.listdir(td) if x.lower().endswith(".png")
+def libre_convert(input_bytes: bytes, out_ext: str, in_name: str = "in"):
+    """
+    LibreOffice generik converter (docx/pptx/xlsx -> pdf, pptx->pdf).
+    out_ext misol: 'pdf'
+    """
+    with tempfile.TemporaryDirectory() as td:
+        in_path = os.path.join(td, f"{in_name}")
+        # OFIS fayl turlarini nomidan aniqlash uchun kengaytmasini saqlab qo'yamiz:
+        # docx/pptx/xlsx kabi
+        if not os.path.splitext(in_path)[1]:
+            # agar nomda kengaytma bo‘lmasa, default docx
+            in_path += ".bin"
+        with open(in_path, "wb") as f:
+            f.write(input_bytes)
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", out_ext, "--outdir", td, in_path],
+                check=True
             )
-            if not files:
-                return None
-            import zipfile
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                for i, p in enumerate(files, 1):
-                    z.write(p, arcname=f"slide-{i}.png")
-            return buf.getvalue()
+            out_path = os.path.join(td, f"{os.path.splitext(os.path.basename(in_path))[0]}.{out_ext}")
+            # ayrim hollarda nom boshqacha chiqishi mumkin, uni topib olamiz:
+            if not os.path.exists(out_path):
+                for fn in os.listdir(td):
+                    if fn.lower().endswith(f".{out_ext}"):
+                        out_path = os.path.join(td, fn)
+                        break
+            with open(out_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            print("LIBRE CONVERT ERROR:", repr(e), file=sys.stderr)
+            traceback.print_exc()
+            return None
 
+
+def pdf_split_bytes(pdf_bytes: bytes, range_str: str) -> Optional[bytes]:
+    """
+    range_str misol: '1-3,7' — 1..3 va 7-sahifa
+    """
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+        total = len(reader.pages)
+
+        wanted: List[int] = []
+        for chunk in re.split(r"[,\s]+", range_str.strip()):
+            if not chunk:
+                continue
+            if "-" in chunk:
+                a, b = chunk.split("-", 1)
+                a = max(1, int(a))
+                b = min(total, int(b))
+                if a <= b:
+                    wanted.extend(list(range(a, b + 1)))
+            else:
+                p = int(chunk)
+                if 1 <= p <= total:
+                    wanted.append(p)
+
+        if not wanted:
+            return None
+
+        for p in wanted:
+            writer.add_page(reader.pages[p - 1])
+
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+    except Exception as e:
+        print("PDF SPLIT ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
         return None
 
 
-def convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
-    return soffice_convert(docx_bytes, in_ext=".docx", out_ext="pdf")
-
-
-# =========================
-# PDF OPS: split / merge / pagenum / watermark
-# =========================
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
-
-def _parse_ranges(spec: str):
-    out = []
-    for part in spec.replace(" ", "").split(","):
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            out.append((int(a), int(b)))
-        else:
-            n = int(part)
-            out.append((n, n))
-    return out
-
-
-def pdf_split_validate(src: bytes, range_spec: str) -> tuple[bool, str]:
+def pdf_merge_bytes(files: List[bytes]) -> Optional[bytes]:
     try:
-        r = PdfReader(io.BytesIO(src))
-        total = len(r.pages)
-    except Exception:
-        return False, "PDF o‘qib bo‘lmadi."
+        writer = PdfWriter()
+        for b in files:
+            r = PdfReader(io.BytesIO(b))
+            for pg in r.pages:
+                writer.add_page(pg)
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+    except Exception as e:
+        print("PDF MERGE ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+        return None
+
+
+def pdf_overlay_text(pdf_bytes: bytes, text: str, pos: str = "bottom-right",
+                     font_size: int = 10) -> Optional[bytes]:
+    """
+    Watermark yoki page number uchun generik overlay. pos: bottom/right/top/center variantlari.
+    """
     try:
-        ranges = _parse_ranges(range_spec)
-    except Exception:
-        return False, "Oraliq formati noto‘g‘ri. Masalan: 1-3,7"
-    for a, b in ranges:
-        if a < 1 or b < 1 or a > b:
-            return False, f"Oraliq xato: {a}-{b}"
-        if b > total:
-            return False, f"Sahifa {b} mavjud emas. PDF’da {total} sahifa bor."
-    return True, ""
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+
+        for i, page in enumerate(reader.pages, start=1):
+            media = page.mediabox
+            w = float(media.width)
+            h = float(media.height)
+
+            # Har sahifa uchun yagona overlay pdf
+            packet = io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(w, h))
+            c.setFont("Helvetica", font_size)
+
+            text_to_draw = text.replace("{page}", str(i))
+
+            # joylashuv
+            margin = 20
+            tw = c.stringWidth(text_to_draw, "Helvetica", font_size)
+            th = font_size + 2
+
+            x, y = margin, margin
+            if "top" in pos:
+                y = h - th - margin
+            if "bottom" in pos:
+                y = margin
+            if "right" in pos:
+                x = w - tw - margin
+            if "left" in pos:
+                x = margin
+            if "center" in pos:
+                x = (w - tw) / 2
+
+            c.drawString(x, y, text_to_draw)
+            c.save()
+
+            packet.seek(0)
+            overlay = PdfReader(packet)
+            overlay_page = overlay.pages[0]
+            page.merge_page(overlay_page)
+            writer.add_page(page)
+
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+    except Exception as e:
+        print("PDF OVERLAY ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+        return None
 
 
-def pdf_split(src: bytes, range_spec: str) -> bytes:
-    r = PdfReader(io.BytesIO(src))
-    w = PdfWriter()
-    total = len(r.pages)
-    for a, b in _parse_ranges(range_spec):
-        a = max(1, a)
-        b = min(total, b)
-        for i in range(a - 1, b):
-            w.add_page(r.pages[i])
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
-
-
-def pdf_merge(parts: list[bytes]) -> bytes:
-    w = PdfWriter()
-    for data in parts:
-        r = PdfReader(io.BytesIO(data))
-        for p in r.pages:
-            w.add_page(p)
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
-
-
-def pdf_add_page_numbers(src: bytes, position: str = "bottom-right") -> bytes:
-    r = PdfReader(io.BytesIO(src))
-    w = PdfWriter()
-    total = len(r.pages)
-
-    for idx in range(total):
-        p = r.pages[idx]
-        pw = float(p.mediabox.width)
-        ph = float(p.mediabox.height)
-
-        layer = io.BytesIO()
-        c = canvas.Canvas(layer, pagesize=(pw, ph))
-        try:
-            pdfmetrics.registerFont(TTFont("DejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
-            c.setFont("DejaVu", 10)
-        except Exception:
-            c.setFont("Helvetica", 10)
-
-        margin = 12 * mm
-        pos = {
-            "bottom-right": (pw - margin, margin, True),
-            "bottom-left": (margin, margin, False),
-            "top-right": (pw - margin, ph - margin, True),
-            "top-left": (margin, ph - margin, False),
-            "bottom-center": (pw / 2, margin, False),
-            "top-center": (pw / 2, ph - margin, False),
-        }.get(position, (pw - margin, margin, True))
-
-        x, y, align_right = pos
-        if align_right:
-            c.drawRightString(x, y, f"{idx + 1}/{total}")
-        else:
-            c.drawString(x, y, f"{idx + 1}/{total}")
-        c.save()
-
-        layer.seek(0)
-        from pypdf import PdfReader as _PR
-        n = _PR(layer)
-        p.merge_page(n.pages[0])
-        w.add_page(p)
-
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
-
-
-def pdf_watermark(src: bytes, text: str) -> bytes:
-    r = PdfReader(io.BytesIO(src))
-    w = PdfWriter()
-
-    p0 = r.pages[0]
-    pw = float(p0.mediabox.width)
-    ph = float(p0.mediabox.height)
-
-    lay = io.BytesIO()
-    c = canvas.Canvas(lay, pagesize=(pw, ph))
+def ocr_pdf_to_text(pdf_bytes: bytes, lang: str = "eng") -> str:
+    """
+    PDF -> images -> tesseract -> text
+    """
     try:
-        pdfmetrics.registerFont(TTFont("DejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
-        c.setFont("DejaVu", 48)
-    except Exception:
-        c.setFont("Helvetica", 48)
-
-    c.saveState()
-    c.translate(pw / 2, ph / 2)
-    c.rotate(45)
-    c.setFillGray(0.2)
-    c.drawCentredString(0, 0, text[:100])
-    c.restoreState()
-    c.save()
-
-    lay.seek(0)
-    wm = PdfReader(lay)
-    for i in range(len(r.pages)):
-        page = r.pages[i]
-        page.merge_page(wm.pages[0])
-        w.add_page(page)
-
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
+        images = convert_from_bytes(pdf_bytes, dpi=200)
+        texts = []
+        for img in images:
+            txt = pytesseract.image_to_string(img, lang=lang)
+            texts.append(txt)
+        return "\n\n".join(texts).strip()
+    except Exception as e:
+        print("OCR ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+        return ""
 
 
 # =========================
-# OCR va TARJIMA (eng yengil yechimlar)
-# =========================
-import pytesseract
-from pdf2image import convert_from_bytes
-import fitz  # PyMuPDF
-from deep_translator import GoogleTranslator
-
-
-def ocr_pdf_to_text(src: bytes, lang: str = "eng") -> str:
-    imgs = convert_from_bytes(src, dpi=220)
-    outs = []
-    for im in imgs:
-        outs.append(pytesseract.image_to_string(im, lang=lang))
-    return "\n\n".join(outs)
-
-
-def extract_pdf_text(src: bytes) -> str:
-    doc = fitz.open(stream=src, filetype="pdf")
-    out = []
-    for p in doc:
-        out.append(p.get_text("text"))
-    return "\n".join(out)
-
-
-def translate_text(text: str, dest: str = "uz", src_lang: str = "auto") -> str:
-    gt = GoogleTranslator(source=src_lang, target=dest)
-    return gt.translate(text)
-
-
-# =========================
-# FORMA QABUL QILISH (DB yo‘q)
+# Resume (docx template -> docx/pdf)
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
@@ -436,7 +352,6 @@ async def send_resume_data(
     if not os.path.exists(tpl_path):
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -459,45 +374,45 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # DOCX render + rasm (ixtiyoriy)
     doc = DocxTemplate(tpl_path)
+
+    # ixtiyoriy foto (InlineImage)
     inline_img = None
-    img = None  # guruhga file sifatida yuborish uchun
+    img_bytes = None
     img_ext = ".png"
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img = await photo.read()
+            img_bytes = await photo.read()
             img_ext = pick_image_ext(photo.filename)
-            if img:
-                inline_img = InlineImage(doc, io.BytesIO(img), width=Mm(35))
+            if img_bytes:
+                inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
     except Exception as e:
-        print("PHOTO ERROR:", repr(e), file=sys.stderr)
+        print("PHOTO INLINE ERROR:", repr(e), file=sys.stderr)
 
     ctx["photo"] = inline_img
 
-    # DOCX bytes
     buf = io.BytesIO()
     doc.render(ctx)
     doc.save(buf)
     docx_bytes = buf.getvalue()
 
-    # PDF bytes
+    # DOCX -> PDF
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # nomlar
+    # Fayl nomlari
     base_name = make_safe_basename(full_name, phone)
     docx_name = f"{base_name}_0.docx"
     pdf_name = f"{base_name}_0.pdf"
     img_name = f"{base_name}{img_ext}"
     json_name = f"{base_name}.json"
 
-    # GURUHGA: rasm + json
+    # Guruhga: rasm + JSON (alohida hujjatlar)
     try:
-        if img:
+        if img_bytes:
             await bot.send_document(
                 GROUP_CHAT_ID,
-                BufferedInputFile(img, filename=img_name),
-                caption=f"🆕 Yangi forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
+                BufferedInputFile(img_bytes, filename=img_name),
+                caption=f"🆕 Forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
             )
         payload = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -526,186 +441,196 @@ async def send_resume_data(
         await bot.send_document(
             GROUP_CHAT_ID,
             BufferedInputFile(json_bytes, filename=json_name),
-            caption=f"📄 Ma'lumotlar JSON: {full_name}"
+            caption=f"📄 JSON: {full_name}"
         )
     except Exception as e:
         print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
 
-    # MIJOZGA: DOCX + PDF
+    # Mijozga: DOCX + PDF
     try:
         chat_id = int(tg_id)
-        await bot.send_document(
-            chat_id,
-            BufferedInputFile(docx_bytes, filename=docx_name),
-            caption="✅ Word formatdagi rezyume"
-        )
+        await bot.send_document(chat_id, BufferedInputFile(docx_bytes, filename=docx_name),
+                                caption="✅ Word formatdagi rezyume")
         if pdf_bytes:
-            await bot.send_document(
-                chat_id,
-                BufferedInputFile(pdf_bytes, filename=pdf_name),
-                caption="✅ PDF formatdagi rezyume"
-            )
+            await bot.send_document(chat_id, BufferedInputFile(pdf_bytes, filename=pdf_name),
+                                    caption="✅ PDF formatdagi rezyume")
         else:
             await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
 
-    return {"status": "success"}
+    # WebApp yopish signalini beradigan JSON
+    return {"status": "success", "close": True}
 
 
 # =========================
-# SESSION MANAGER
+# Start / Help / New_resume
 # =========================
-SessionOp = Literal["split", "merge", "pagenum", "watermark", "convert", "ocr", "translate"]
-SESSIONS: dict[int, dict] = {}
-SESS_LOCK = threading.Lock()
+@dp.message(Command("start"))
+async def start_cmd(m: Message):
+    ACTIVE_USERS.add(m.from_user.id)
+    text = (
+        f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
+        "/new_resume - Yangi obektivka\n"
+        "/help - Yordam\n\n"
+        "@octagon_print"
+    )
+    await m.answer(text)
 
 
-def start_session(uid: int, op: SessionOp):
-    with SESS_LOCK:
-        SESSIONS[uid] = {
-            "op": op,
-            "files": [],   # list of dict{name, bytes, mime}
-            "params": {},  # op ga qarab: range/pos/wm/target/lang/to
-            "created_at": datetime.utcnow().isoformat() + "Z",
-        }
-
-
-def get_session(uid: int) -> Optional[dict]:
-    with SESS_LOCK:
-        return SESSIONS.get(uid)
-
-
-def clear_session(uid: int):
-    with SESS_LOCK:
-        SESSIONS.pop(uid, None)
-
-
-def session_summary(s: dict) -> str:
-    files = s["files"]
-    params = s["params"]
-    lines = [f"🔧 Jarayon: {s['op']}"]
-    if files:
-        lines.append(f"📎 Fayllar: {len(files)} ta")
-        for i, f in enumerate(files, 1):
-            lines.append(f"  {i}) {f['name']} ({len(f['bytes'])//1024} KB)")
-    else:
-        lines.append("📎 Fayl hali yuborilmadi")
-    if params:
-        lines.append("⚙️ Parametrlar:")
-        for k, v in params.items():
-            lines.append(f"  • {k}: {v}")
-    else:
-        lines.append("⚙️ Parametrlar hali berilmagan")
-    lines.append("Yakunlash: /done   |   Bekor: /cancel")
-    return "\n".join(lines)
-
-
-# =========================
-# SESSION: Entry komandalar
-# =========================
-@dp.message(Command("pdf_merge"))
-async def sess_merge(m: Message):
-    start_session(m.from_user.id, "merge")
+@dp.message(Command("help"))
+async def help_cmd(m: Message):
     await m.answer(
-        "🧩 PDF birlashtirish sessiyasi boshlandi.\n"
-        "Bir nechta PDF faylni ketma-ket yuboring (captionsiz).\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
+        "Asosiy komandalar:\n"
+        "/new_resume – Web formani ochish\n"
+        "/pdf_split – PDFdan sahifalarni ajratish\n"
+        "/pdf_merge – PDFlarni qo‘shish\n"
+        "/pagenum – PDFga sahifa raqami qo‘shish\n"
+        "/watermark – PDFga watermark qo‘shish\n"
+        "/ocr – Skan PDFdan matn chiqarish\n"
+        "/convert – DOCX/PPTX/XLSX/PDF konvertatsiya\n"
+        "/translate – PDF matnini tarjima qilish\n"
+        "/status – Sessiya holati\n"
+        "/cancel – Sessiyani bekor qilish\n"
+        "/done – Amalni yakunlash"
     )
 
 
-@dp.message(Command("pdf_split"))
-async def sess_split(m: Message):
-    start_session(m.from_user.id, "split")
+@dp.message(Command("new_resume"))
+async def new_resume_cmd(m: Message):
+    base = (APP_BASE or "").rstrip("/")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Obyektivkani to‘ldirish",
+                web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
+            )
+        ]]
+    )
+    txt = ("👋 Assalomu alaykum!\n📄 Obyektivka (ma’lumotnoma)\n"
+           "✅ Tez\n✅ Oson\n✅ Ishonchli\n"
+           "quyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇")
+    await m.answer(txt, reply_markup=kb)
+
+
+# =========================
+# Session boshqaruv komandalar
+# =========================
+async def show_status(m: Message):
+    s = get_session(m.from_user.id)
+    if not s:
+        return await m.answer("❌ Sessiya yo‘q. /pdf_split, /pdf_merge, /convert … dan birini boshlab yuboring.")
+    files_info = "—"
+    if s["files"]:
+        files_info = "\n".join([f" {i+1}) {f['name']} ({human_size(len(f['bytes']))})"
+                                for i, f in enumerate(s["files"])])
+    params_info = "Parametrlar hali berilmagan" if not s["params"] else json.dumps(s["params"], ensure_ascii=False)
     await m.answer(
-        "✂️ PDF ajratish sessiyasi boshlandi.\n"
-        "1) Bitta PDF fayl yuboring.\n"
-        "2) Oraliq kiriting: /range 1-3,7\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
+        f"🧩 Jarayon: {s['op']}\n"
+        f"📎 Fayllar: {len(s['files'])} ta\n{files_info}\n"
+        f"⚙️ Parametrlar: {params_info}\n"
+        f"Yakunlash: /done   |   Bekor: /cancel"
+    )
+
+
+@dp.message(Command("status"))
+async def cmd_status(m: Message):
+    await show_status(m)
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(m: Message):
+    clear_session(m.from_user.id)
+    await m.answer("❌ Session bekor qilindi.")
+
+
+# ---- Start session commands
+@dp.message(Command("pdf_split"))
+async def cmd_split(m: Message):
+    new_session(m.from_user.id, "split")
+    await m.answer(
+        "✂️ PDF Split sessiyasi boshlandi.\n"
+        "1) PDF fayl yuboring.\n"
+        "2) Oraliq ko‘rsating: /range 1-3,7\n"
+        "Tugash: /done   |   Holat: /status   |   Bekor: /cancel"
+    )
+
+
+@dp.message(Command("pdf_merge"))
+async def cmd_merge(m: Message):
+    new_session(m.from_user.id, "merge")
+    await m.answer(
+        "🧷 PDF Merge sessiyasi boshlandi.\n"
+        "Ketma-ket bir nechta PDF yuboring (har safar qo‘shiladi).\n"
+        "Tugash: /done   |   Holat: /status   |   Bekor: /cancel"
     )
 
 
 @dp.message(Command("pagenum"))
-async def sess_pagenum(m: Message):
-    start_session(m.from_user.id, "pagenum")
+async def cmd_pagenum(m: Message):
+    new_session(m.from_user.id, "pagenum")
     await m.answer(
-        "🔢 PDF sahifa raqami sessiyasi boshlandi.\n"
-        "1) Bitta PDF fayl yuboring.\n"
-        "2) Ixtiyoriy joylashuv: /pos bottom-right | bottom-left | bottom-center | top-right | top-left | top-center\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
+        "🔢 Sahifa raqami sessiyasi.\n"
+        "1) PDF yuboring.\n"
+        "2) Pozitsiyani bering: /pos bottom-right (yoki top-left/top-center/...)\n"
+        "Tugash: /done   |   Holat: /status"
     )
 
 
 @dp.message(Command("watermark"))
-async def sess_watermark(m: Message):
-    start_session(m.from_user.id, "watermark")
+async def cmd_watermark(m: Message):
+    new_session(m.from_user.id, "watermark")
     await m.answer(
-        "💧 PDF watermark sessiyasi boshlandi.\n"
-        "1) Bitta PDF fayl yuboring.\n"
-        "2) Watermark matnini kiriting: /wm YOUR_TEXT\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
+        "💧 Watermark sessiyasi.\n"
+        "1) PDF yuboring.\n"
+        "2) Matn: /wm Confidential\n"
+        "3) Pozitsiya ixtiyoriy: /pos bottom-right\n"
+        "Tugash: /done   |   Holat: /status"
+    )
+
+
+@dp.message(Command("ocr"))
+async def cmd_ocr(m: Message):
+    new_session(m.from_user.id, "ocr")
+    await m.answer(
+        "🪄 OCR sessiyasi.\n"
+        "1) Skan qilingan PDF yuboring.\n"
+        "2) Tesseract til kodi: /lang eng  (uzb uchun 'uzb', rus 'rus', ...)\n"
+        "Tugash: /done   |   Holat: /status"
+    )
+
+
+@dp.message(Command("translate"))
+async def cmd_translate(m: Message):
+    new_session(m.from_user.id, "translate")
+    await m.answer(
+        "🌐 Tarjima sessiyasi.\n"
+        "1) PDF yuboring (matnli yoki OCR qilingan bo‘lsa yaxshi).\n"
+        "2) Maqsad til: /to uz  (misol: uz, ru, en)\n"
+        "Tugash: /done   |   Holat: /status"
     )
 
 
 @dp.message(Command("convert"))
-async def sess_convert(m: Message):
-    start_session(m.from_user.id, "convert")
+async def cmd_convert(m: Message):
+    new_session(m.from_user.id, "convert")
     await m.answer(
         "🔁 Konvert sessiyasi boshlandi.\n"
         "1) Bitta fayl yuboring (DOCX/PPTX/XLSX yoki PDF; PPTX→PNG uchun PPTX yuboring).\n"
         "2) Maqsad format: /target pdf | png | docx | pptx\n"
         "Qoida:\n"
-        " • DOCX/PPTX/XLSX → PDF: /target pdf\n"
-        " • PPTX → PNG (ZIP): /target png\n"
-        " • PDF → DOCX: /target docx\n"
-        " • PDF → PPTX: /target pptx\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
+        "  • DOCX/PPTX/XLSX → PDF : /target pdf\n"
+        "  • PPTX → PNG (1-slayd) : /target png\n"
+        "  • PDF → PNG (1-sahifa) : /target png\n"
+        "  • PDF → PPTX/DOCX ❌ qo‘llanmaydi\n"
+        "Tugash: /done   |   Holat: /status"
     )
 
 
-@dp.message(Command("ocr"))
-async def sess_ocr(m: Message):
-    start_session(m.from_user.id, "ocr")
-    await m.answer(
-        "🔎 OCR sessiyasi boshlandi.\n"
-        "1) Bitta PDF fayl yuboring.\n"
-        "2) Til (ixtiyoriy): /lang eng  (mas: uzb, rus — o‘rnatilgan bo‘lishi kerak)\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
-    )
-
-
-@dp.message(Command("translate"))
-async def sess_translate(m: Message):
-    start_session(m.from_user.id, "translate")
-    await m.answer(
-        "🌐 Tarjima sessiyasi boshlandi.\n"
-        "1) Bitta PDF fayl yuboring.\n"
-        "2) Maqsad til (ixtiyoriy): /to uz  (yoki ru, en, ...)\n"
-        "Tugagach: /done  |  Bekor: /cancel  |  Holat: /status"
-    )
-
-
-@dp.message(Command("cancel"))
-async def sess_cancel(m: Message):
-    clear_session(m.from_user.id)
-    await m.answer("❌ Session bekor qilindi.")
-
-
-@dp.message(Command("status"))
-async def sess_status(m: Message):
-    s = get_session(m.from_user.id)
-    if not s:
-        return await m.answer("Session yo‘q. Boshlash: /pdf_merge, /pdf_split, /pagenum, /watermark, /convert, /ocr, /translate")
-    await m.answer(session_summary(s))
-
-
 # =========================
-# SESSION: Parametr komandalar
+# Parametr komandalar (versiya-agnostik)
 # =========================
-# SESSION: Parametr komandalar (versiya-agnostik)
-# =========================
-# Kompilyatsiyalangan regexlar (tezroq va qulay)
 RE_RANGE  = re.compile(r"^/range\s+(.+)$")
 RE_POS    = re.compile(r"^/pos\s+(\S+)$")
 RE_WM     = re.compile(r"^/wm\s+(.+)$")
@@ -714,16 +639,14 @@ RE_LANG   = re.compile(r"^/lang\s+(\S+)$")
 RE_TO     = re.compile(r"^/to\s+(\S+)$")
 RE_MISS   = re.compile(r"^/(range|pos|wm|target|lang|to)\s*$")
 
-def _get_match(message: Message, data: dict, pattern: re.Pattern) -> re.Match | None:
-    """
-    Aiogram 3 minor versiyalaridagi nomlar farqi (`regexp` vs `match`)ni yopish.
-    Agar middleware hech narsa uzatmasa, o‘zimiz regex bilan tekshiramiz.
-    """
+
+def _get_match(message: Message, data: dict, pattern: re.Pattern) -> Optional[re.Match]:
     mobj = data.get("regexp") or data.get("match")
     if mobj:
         return mobj
-    text = (message.text or "").strip()
-    return pattern.match(text)
+    txt = (message.text or "").strip()
+    return pattern.match(txt)
+
 
 @dp.message(F.text.regexp(RE_RANGE))
 async def param_range(m: Message, **data):
@@ -736,40 +659,43 @@ async def param_range(m: Message, **data):
     s["params"]["range"] = mobj.group(1).strip()
     await m.answer("✅ Oraliq qabul qilindi. /status yoki /done")
 
+
 @dp.message(F.text.regexp(RE_POS))
 async def param_pos(m: Message, **data):
     s = get_session(m.from_user.id)
-    if not s or s["op"] != "pagenum":
-        return await m.answer("Bu parametr faqat /pagenum sessiyasida ishlaydi.")
+    if not s or s["op"] not in {"pagenum", "watermark"}:
+        return await m.answer("Bu parametr /pagenum yoki /watermark sessiyalarida ishlaydi.")
     mobj = _get_match(m, data, RE_POS)
     if not mobj:
-        return await m.answer("Pozitsiya formati: /pos bottom-right")
+        return await m.answer("Pozitsiya: /pos bottom-right")
     pos = mobj.group(1).strip().lower()
     allowed = {"bottom-right","bottom-left","bottom-center","top-right","top-left","top-center"}
     if pos not in allowed:
-        return await m.answer("Noto‘g‘ri pozitsiya. Ruxsat etilganlar: " + ", ".join(sorted(allowed)))
+        return await m.answer("Noto‘g‘ri pozitsiya. Ruxsat: " + ", ".join(sorted(allowed)))
     s["params"]["pos"] = pos
     await m.answer("✅ Joylashuv qabul qilindi. /status yoki /done")
+
 
 @dp.message(F.text.regexp(RE_WM))
 async def param_wm(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "watermark":
-        return await m.answer("Bu parametr faqat /watermark sessiyasida ishlaydi.")
+        return await m.answer("Bu parametr faqat /watermark sessiyasida.")
     mobj = _get_match(m, data, RE_WM)
     if not mobj:
-        return await m.answer("Matn formati: /wm Confidential")
+        return await m.answer("Matn: /wm Confidential")
     text = mobj.group(1).strip()
     if not text:
         return await m.answer("Matn bo‘sh bo‘lmasin.")
     s["params"]["wm"] = text[:100]
-    await m.answer("✅ Watermark matni qabul qilindi. /status yoki /done")
+    await m.answer("✅ Watermark matni qabul qilindi.")
+
 
 @dp.message(F.text.regexp(RE_TARGET))
 async def param_target(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "convert":
-        return await m.answer("Bu parametr faqat /convert sessiyasida ishlaydi.")
+        return await m.answer("Bu parametr faqat /convert sessiyasida.")
     mobj = _get_match(m, data, RE_TARGET)
     if not mobj:
         return await m.answer("Maqsad format: /target pdf | png | docx | pptx")
@@ -777,31 +703,33 @@ async def param_target(m: Message, **data):
     if target not in {"pdf","png","docx","pptx"}:
         return await m.answer("Maqsad format: pdf | png | docx | pptx")
     s["params"]["target"] = target
-    await m.answer("✅ Maqsad format qabul qilindi. /status yoki /done")
+    await m.answer("✅ Maqsad format qabul qilindi.")
+
 
 @dp.message(F.text.regexp(RE_LANG))
 async def param_lang(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "ocr":
-        return await m.answer("Bu parametr faqat /ocr sessiyasida ishlaydi.")
+        return await m.answer("Bu parametr faqat /ocr sessiyasida.")
     mobj = _get_match(m, data, RE_LANG)
     if not mobj:
-        return await m.answer("Til formati: /lang eng")
+        return await m.answer("Til kodi: /lang eng")
     s["params"]["lang"] = mobj.group(1).strip()
-    await m.answer("✅ Til qabul qilindi. /status yoki /done")
+    await m.answer("✅ Til qabul qilindi.")
+
 
 @dp.message(F.text.regexp(RE_TO))
 async def param_to(m: Message, **data):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "translate":
-        return await m.answer("Bu parametr faqat /translate sessiyasida ishlaydi.")
+        return await m.answer("Bu parametr faqat /translate sessiyasida.")
     mobj = _get_match(m, data, RE_TO)
     if not mobj:
-        return await m.answer("Maqsad til formati: /to uz")
+        return await m.answer("Maqsad til: /to uz")
     s["params"]["to"] = mobj.group(1).strip()
-    await m.answer("✅ Maqsad til qabul qilindi. /status yoki /done")
+    await m.answer("✅ Maqsad til qabul qilindi.")
 
-# Parametrsiz yuborilganda foydalanuvchiga prompt
+
 @dp.message(F.text.regexp(RE_MISS))
 async def param_missing(m: Message, **data):
     mobj = _get_match(m, data, RE_MISS)
@@ -818,124 +746,240 @@ async def param_missing(m: Message, **data):
 
 
 # =========================
-# SESSION: Yakunlash (/done)
+# Fayl qabul qilish (barqaror download)
 # =========================
-@dp.message(Command("done"))
-async def sess_done(m: Message):
+@dp.message(F.document)
+async def collect_file(m: Message):
     s = get_session(m.from_user.id)
     if not s:
-        return await m.answer("Session yo‘q. Boshlash: /pdf_merge, /pdf_split, /pagenum, /watermark, /convert, /ocr, /translate")
+        return  # sessiya bo'lmasa jim
+
+    name = m.document.file_name or "file.bin"
+    mime = m.document.mime_type or "application/octet-stream"
+
+    data = None
+    try:
+        tg_file = await bot.get_file(m.document.file_id)
+        buf = io.BytesIO()
+        await bot.download(tg_file, destination=buf)
+        data = buf.getvalue()
+    except Exception as e1:
+        try:
+            fobj = await bot.download(m.document)
+            data = fobj.read()
+        except Exception as e2:
+            try:
+                tg_file = await bot.get_file(m.document.file_id)
+                buf = io.BytesIO()
+                await bot.download(tg_file, destination=buf)
+                data = buf.getvalue()
+            except Exception as e3:
+                print("DOCUMENT DOWNLOAD ERROR:", repr(e1), repr(e2), repr(e3), file=sys.stderr)
+                return await m.reply("❌ Faylni yuklab olishda xatolik. Qayta yuboring.")
+
+    if data is None:
+        return await m.reply("❌ Faylni qabul qilib bo‘lmadi. Qayta urinib ko‘ring.")
+
+    op = s["op"]
+    if op == "merge":
+        if mime != "application/pdf":
+            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.")
+        s["files"].append({"name": name, "bytes": data, "mime": mime})
+        return await m.reply(f"Qo‘shildi ✅  ({name})  — jami: {len(s['files'])}")
+
+    if op in {"split", "pagenum", "watermark", "ocr", "translate", "convert"}:
+        s["files"] = [{"name": name, "bytes": data, "mime": mime}]
+        if op in {"split", "pagenum", "watermark", "ocr", "translate"} and mime != "application/pdf":
+            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.")
+        await m.reply(f"Fayl qabul qilindi: {name} ✅  (/status yoki parametr yuboring, keyin /done)")
+
+
+# =========================
+# /done – bajarish
+# =========================
+@dp.message(Command("done"))
+async def cmd_done(m: Message):
+    s = get_session(m.from_user.id)
+    if not s:
+        return await m.answer("Sessiya yo‘q.")
 
     op = s["op"]
     files = s["files"]
-    params = s["params"]
+    p = s["params"]
 
     try:
-        if op == "merge":
-            if len(files) < 2:
-                return await m.answer("Kamida 2 ta PDF kerak.")
-            await m.answer("⏳ Birlashtirilmoqda...")
-            out = pdf_merge([f["bytes"] for f in files])
-            clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(out, filename="merged.pdf"))
-
         if op == "split":
             if not files:
-                return await m.answer("Bitta PDF yuboring.")
-            if "range" not in params:
-                return await m.answer("Oraliq belgilang: /range 1-3,7")
-            ok, msg = pdf_split_validate(files[0]["bytes"], params["range"])
-            if not ok:
-                return await m.answer("❌ " + msg)
-            await m.answer("⏳ Ajratilmoqda...")
-            out = pdf_split(files[0]["bytes"], params["range"])
+                return await m.answer("PDF yuboring.")
+            if "range" not in p:
+                return await m.answer("Oraliq kerak: /range 1-3,7")
+            out = pdf_split_bytes(files[0]["bytes"], p["range"])
+            if not out:
+                return await m.answer("Ajratishda xatolik.")
+            await bot.send_document(m.chat.id, BufferedInputFile(out, filename="split.pdf"),
+                                    caption="✅ Split tayyor")
             clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(out, filename="split.pdf"))
+            return
+
+        if op == "merge":
+            if len(files) < 2:
+                return await m.answer("Hech bo‘lmasa 2 ta PDF yuboring.")
+            out = pdf_merge_bytes([f["bytes"] for f in files])
+            if not out:
+                return await m.answer("Merge xatolik.")
+            await bot.send_document(m.chat.id, BufferedInputFile(out, filename="merge.pdf"),
+                                    caption="✅ Merge tayyor")
+            clear_session(m.from_user.id)
+            return
 
         if op == "pagenum":
             if not files:
-                return await m.answer("Bitta PDF yuboring.")
-            pos = params.get("pos", "bottom-right")
-            await m.answer("⏳ Raqamlar qo‘shilmoqda...")
-            out = pdf_add_page_numbers(files[0]["bytes"], position=pos)
+                return await m.answer("PDF yuboring.")
+            pos = p.get("pos", "bottom-right")
+            out = pdf_overlay_text(files[0]["bytes"], text="{page}", pos=pos, font_size=10)
+            if not out:
+                return await m.answer("Sahifa raqami qo‘shishda xatolik.")
+            await bot.send_document(m.chat.id, BufferedInputFile(out, filename="pagenum.pdf"),
+                                    caption="✅ Sahifa raqamlari qo‘shildi")
             clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(out, filename="pagenum.pdf"))
+            return
 
         if op == "watermark":
             if not files:
-                return await m.answer("Bitta PDF yuboring.")
-            if "wm" not in params:
-                return await m.answer("Watermark matnini belgilang: /wm YOUR_TEXT")
-            await m.answer("⏳ Watermark qo‘shilmoqda...")
-            out = pdf_watermark(files[0]["bytes"], params["wm"])
+                return await m.answer("PDF yuboring.")
+            wm = p.get("wm")
+            if not wm:
+                return await m.answer("Matn bering: /wm Confidential")
+            pos = p.get("pos", "bottom-right")
+            out = pdf_overlay_text(files[0]["bytes"], text=wm, pos=pos, font_size=14)
+            if not out:
+                return await m.answer("Watermarkda xatolik.")
+            await bot.send_document(m.chat.id, BufferedInputFile(out, filename="watermark.pdf"),
+                                    caption="✅ Watermark qo‘shildi")
             clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(out, filename="watermark.pdf"))
-
-        if op == "convert":
-            if not files:
-                return await m.answer("Bitta fayl yuboring.")
-            if "target" not in params:
-                return await m.answer("Maqsad formatni belgilang: /target pdf|png|docx|pptx")
-            target = params["target"]
-            name = files[0]["name"].lower()
-            in_ext = os.path.splitext(name)[1]
-
-            # DOCX/PPTX/XLSX → PDF
-            if target == "pdf" and in_ext in {".docx", ".pptx", ".xlsx"}:
-                await m.answer("⏳ Konvert qilinmoqda (→ PDF)...")
-                out = soffice_convert(files[0]["bytes"], in_ext=in_ext, out_ext="pdf")
-                if not out:
-                    return await m.answer("Konvert xatosi (LibreOffice).")
-                clear_session(m.from_user.id)
-                return await m.answer_document(BufferedInputFile(out, filename="converted.pdf"))
-
-            # PPTX → PNG (ZIP)
-            if target == "png" and in_ext == ".pptx":
-                await m.answer("⏳ Slaydlar PNG'ga eksport qilinmoqda...")
-                zip_bytes = soffice_convert(files[0]["bytes"], in_ext=".pptx", out_ext="png")
-                if not zip_bytes:
-                    return await m.answer("PPTX → PNG eksport xatosi.")
-                clear_session(m.from_user.id)
-                return await m.answer_document(BufferedInputFile(zip_bytes, filename="slides_png.zip"))
-
-            # PDF → DOCX/PPTX
-            if in_ext == ".pdf" and target in {"docx", "pptx"}:
-                await m.answer(f"⏳ Konvert qilinmoqda (PDF → {target.upper()})...")
-                out = soffice_convert(files[0]["bytes"], in_ext=".pdf", out_ext=target)
-                if not out:
-                    return await m.answer(f"PDF → {target.upper()} konvert xatosi.")
-                clear_session(m.from_user.id)
-                return await m.answer_document(BufferedInputFile(out, filename=f"converted.{target}"))
-
-            return await m.answer("Noto‘g‘ri format kombinatsiyasi. /status ko‘ring va /target to‘g‘ri ekanini tekshiring.")
+            return
 
         if op == "ocr":
             if not files:
-                return await m.answer("Bitta PDF yuboring.")
-            lang = params.get("lang", "eng")
-            await m.answer(f"⏳ OCR bajarilmoqda (lang={lang})...")
-            text = ocr_pdf_to_text(files[0]["bytes"], lang=lang)
+                return await m.answer("PDF yuboring.")
+            lang = p.get("lang", "eng")
+            txt = ocr_pdf_to_text(files[0]["bytes"], lang=lang)
+            if not txt:
+                return await m.answer("OCR natijasi bo‘sh. Til kodini tekshiring (/lang eng).")
+            await bot.send_document(
+                m.chat.id,
+                BufferedInputFile(txt.encode("utf-8"), filename="ocr.txt"),
+                caption=f"✅ OCR tayyor (lang={lang})"
+            )
             clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(text.encode("utf-8"), filename=f"ocr_{lang}.txt"))
+            return
 
         if op == "translate":
             if not files:
-                return await m.answer("Bitta PDF yuboring.")
-            dest = params.get("to", "uz")
-            await m.answer(f"⏳ PDF matni olinmoqda va tarjima qilinmoqda (→ {dest})...")
-            text = extract_pdf_text(files[0]["bytes"])
-            tr = translate_text(text, dest=dest, src_lang="auto")
+                return await m.answer("PDF yuboring.")
+            to = p.get("to", "uz")
+            # PDFdan matn olish (soddalashtirilgan: OCR emas, text layer bor deb faraz)
+            reader = PdfReader(io.BytesIO(files[0]["bytes"]))
+            src_text = "\n\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+            if not src_text:
+                return await m.answer("PDFdan matn olinmadi. Avval /ocr bilan text oling.")
+            out_text = src_text
+            if Translator:
+                try:
+                    tr = Translator()
+                    out_text = tr.translate(src_text, dest=to).text
+                except Exception as e:
+                    print("TRANSLATE ERROR:", repr(e), file=sys.stderr)
+            await bot.send_document(
+                m.chat.id,
+                BufferedInputFile(out_text.encode("utf-8"), filename=f"translate_{to}.txt"),
+                caption=f"✅ Tarjima tayyor (-> {to})"
+            )
             clear_session(m.from_user.id)
-            return await m.answer_document(BufferedInputFile(tr.encode("utf-8"), filename=f"translated_{dest}.txt"))
+            return
 
-        return await m.answer("Noma'lum session turi.")
+        if op == "convert":
+            if not files:
+                return await m.answer("Fayl yuboring.")
+            target = p.get("target")
+            if target not in {"pdf", "png", "docx", "pptx"}:
+                return await m.answer("Maqsad format: /target pdf|png|docx|pptx")
+
+            name = files[0]["name"].lower()
+            data = files[0]["bytes"]
+
+            # DOCX/PPTX/XLSX -> PDF
+            if target == "pdf" and name.endswith((".docx", ".pptx", ".xlsx")):
+                out = libre_convert(data, "pdf", in_name=name)
+                if not out:
+                    return await m.answer("Konvert xatolik.")
+                await bot.send_document(m.chat.id, BufferedInputFile(out, filename=f"{os.path.splitext(name)[0]}.pdf"),
+                                        caption="✅ PDF tayyor")
+                clear_session(m.from_user.id)
+                return
+
+            # PPTX -> PNG (1-slayd), PDF -> PNG (1-sahifa)
+            if target == "png" and (name.endswith(".pptx") or name.endswith(".pdf")):
+                # Agar PPTX bo'lsa avval PDFga aylantirib olamiz
+                if name.endswith(".pptx"):
+                    pdf = libre_convert(data, "pdf", in_name=name)
+                    if not pdf:
+                        return await m.answer("PPTX->PDF xatolik.")
+                    pages = convert_from_bytes(pdf, dpi=180, first_page=1, last_page=1)
+                else:
+                    pages = convert_from_bytes(data, dpi=180, first_page=1, last_page=1)
+
+                buf = io.BytesIO()
+                pages[0].save(buf, format="PNG")
+                await bot.send_document(m.chat.id,
+                                        BufferedInputFile(buf.getvalue(), filename=f"{os.path.splitext(name)[0]}_1.png"),
+                                        caption="✅ PNG (1-sahifa/slayd)")
+                clear_session(m.from_user.id)
+                return
+
+            # PDF -> DOCX/PPTX qo‘llanmaydi
+            return await m.answer("Bu yo‘nalish hozircha qo‘llanmaydi yoki noto‘g‘ri maqsad format.")
+
     except Exception as e:
+        print("DONE ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
-        return await m.answer(f"❌ Xatolik: {e}")
+        await m.answer("❌ Jarayon davomida xatolik yuz berdi. /status bilan tekshiring yoki /cancel qiling.")
+        return
 
 
 # =========================
-# WEBHOOK
+# Bot commands list (menu)
+# =========================
+async def _set_commands():
+    cmds = [
+        BotCommand(command="start", description="Boshlash"),
+        BotCommand(command="new_resume", description="Web rezyume forma"),
+        BotCommand(command="help", description="Yordam"),
+        BotCommand(command="pdf_split", description="PDF sahifalarini ajratish"),
+        BotCommand(command="pdf_merge", description="Bir nechta PDFni qo‘shish"),
+        BotCommand(command="pagenum", description="PDFga sahifa raqami qo‘shish"),
+        BotCommand(command="watermark", description="PDFga watermark qo‘shish"),
+        BotCommand(command="ocr", description="Skan PDFdan matn chiqarish"),
+        BotCommand(command="convert", description="Fayl konvertatsiya"),
+        BotCommand(command="translate", description="PDF matnini tarjima"),
+        BotCommand(command="status", description="Sessiya holati"),
+        BotCommand(command="done", description="Yakunlash"),
+        BotCommand(command="cancel", description="Bekor qilish"),
+    ]
+    await bot.set_my_commands(cmds)
+    print("✅ Bot commands list yangilandi")
+
+
+@app.on_event("startup")
+async def on_startup():
+    try:
+        await _set_commands()
+    except Exception as e:
+        print("SET COMMANDS ERROR:", repr(e), file=sys.stderr)
+
+
+# =========================
+# Webhook endpoints
 # =========================
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
@@ -944,8 +988,8 @@ async def telegram_webhook(request: Request):
         if hasattr(dp, "feed_raw_update"):
             await dp.feed_raw_update(bot, data)
         else:
-            update = Update.model_validate(data)
-            await dp.feed_update(bot, update)
+            upd = Update.model_validate(data)
+            await dp.feed_update(bot, upd)
         return {"ok": True}
     except Exception as e:
         print("=== WEBHOOK ERROR ===", file=sys.stderr)
@@ -963,7 +1007,7 @@ async def set_webhook(base: str | None = None):
 
 
 # =========================
-# DEBUG
+# Debug
 # =========================
 @app.get("/debug/ping")
 def debug_ping():
@@ -974,9 +1018,3 @@ def debug_ping():
 async def debug_getme():
     me = await bot.get_me()
     return {"id": me.id, "username": me.username}
-
-
-@app.get("/debug/refresh_commands")
-async def refresh_commands():
-    await set_commands()
-    return {"ok": True}
