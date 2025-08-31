@@ -39,6 +39,18 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 ACTIVE_USERS = set()
 
+from aiogram.types import BotCommand
+
+# ...
+
+async def set_commands():
+    commands = [
+        BotCommand(command="start", description="Boshlash"),
+        BotCommand(command="new_resume", description="Yangi obyektivka"),
+        BotCommand(command="help", description="Yordam"),
+    ]
+    await bot.set_my_commands(commands)
+
 
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
