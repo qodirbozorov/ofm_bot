@@ -279,41 +279,77 @@ def ocr_pdf_to_text(pdf_bytes: bytes, lang: str = "eng") -> str:
 
 
 # =========================
-# Resume form handler (WebApp) — rasmga limit qo‘ymadik
+# FORMA QABUL QILISH (422 yo‘q) — REPLACE OLD /send_resume_data WITH THIS
 # =========================
+from typing import Optional
+
 @app.post("/send_resume_data")
 async def send_resume_data(
-    full_name: str = Form(...),
-    phone: str = Form(...),
-    tg_id: str = Form(...),
-    birth_date: str = Form(""),
-    birth_place: str = Form(""),
-    nationality: str = Form("O‘zbek"),
-    party_membership: str = Form("Yo‘q"),
-    education: str = Form(""),
-    university: str = Form(""),
-    specialization: str = Form("Yo‘q"),
-    ilmiy_daraja: str = Form("Yo‘q"),
-    ilmiy_unvon: str = Form("Yo‘q"),
-    languages: str = Form("Yo‘q"),
-    dav_mukofoti: str = Form("Yo‘q"),
-    deputat: str = Form("Yo‘q"),
-    adresss: str = Form(""),
-    current_position_date: str = Form(""),
-    current_position_full: str = Form(""),
-    work_experience: str = Form(""),
-    relatives: str = Form("[]"),
+    full_name: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+    tg_id: Optional[str] = Form(None),
+
+    birth_date: Optional[str] = Form(None),
+    birth_place: Optional[str] = Form(None),
+    nationality: Optional[str] = Form(None),
+    party_membership: Optional[str] = Form(None),
+    education: Optional[str] = Form(None),
+    university: Optional[str] = Form(None),
+    specialization: Optional[str] = Form(None),
+    ilmiy_daraja: Optional[str] = Form(None),
+    ilmiy_unvon: Optional[str] = Form(None),
+    languages: Optional[str] = Form(None),
+    dav_mukofoti: Optional[str] = Form(None),
+    deputat: Optional[str] = Form(None),
+    adresss: Optional[str] = Form(None),
+    current_position_date: Optional[str] = Form(None),
+    current_position_full: Optional[str] = Form(None),
+    work_experience: Optional[str] = Form(None),
+    relatives: Optional[str] = Form(None),
+
+    # WebApp rasmini limitlamaymiz (sening so‘rovingga ko‘ra)
     photo: UploadFile | None = None,
 ):
+    # --- 0) Normallashtirish (None -> "")
+    def nz(v, default=""):
+        return v if v is not None else default
+
+    full_name = nz(full_name)
+    phone = nz(phone)
+    tg_id_str = nz(tg_id)
+
+    birth_date = nz(birth_date)
+    birth_place = nz(birth_place)
+    nationality = nz(nationality, "O‘zbek")
+    party_membership = nz(party_membership, "Yo‘q")
+    education = nz(education)
+    university = nz(university)
+    specialization = nz(specialization, "Yo‘q")
+    ilmiy_daraja = nz(ilmiy_daraja, "Yo‘q")
+    ilmiy_unvon = nz(ilmiy_unvon, "Yo‘q")
+    languages = nz(languages, "Yo‘q")
+    dav_mukofoti = nz(dav_mukofoti, "Yo‘q")
+    deputat = nz(deputat, "Yo‘q")
+    adresss = nz(adresss)
+    current_position_date = nz(current_position_date)
+    current_position_full = nz(current_position_full)
+    work_experience = nz(work_experience)
+
+    # relatives JSON -> list
     try:
         rels = json.loads(relatives) if relatives else []
+        if not isinstance(rels, list):
+            rels = []
     except Exception:
         rels = []
 
+    # --- 1) Template mavjudligini tekshir
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
-        return JSONResponse({"status": "error", "error": "resume.docx topilmadi"}, status_code=200)
+        # 422 o‘rniga 200 OK + status=error (web app alert uchun qulay)
+        return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
+    # --- 2) DocxTpl context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -336,6 +372,7 @@ async def send_resume_data(
         "relatives": rels,
     }
 
+    # --- 3) DOCX render (+ rasm ixtiyoriy, limit YO‘Q)
     doc = DocxTemplate(tpl_path)
 
     inline_img = None
@@ -343,7 +380,7 @@ async def send_resume_data(
     img_ext = ".png"
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img_bytes = await photo.read()  # WebApp uchun limit qo‘ymadik
+            img_bytes = await photo.read()  # WebApp: limit qo‘ymaymiz
             img_ext = pick_image_ext(photo.filename)
             if img_bytes:
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
@@ -358,23 +395,24 @@ async def send_resume_data(
     docx_bytes = buf.getvalue()
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    base_name = make_safe_basename(full_name, phone)
+    # --- 4) Fayl nomlari (bo‘sh bo‘lsa ham ishlayveradi)
+    base_name = make_safe_basename(full_name or "user", phone or "NaN")
     docx_name = f"{base_name}_0.docx"
     pdf_name = f"{base_name}_0.pdf"
     img_name = f"{base_name}{img_ext}"
     json_name = f"{base_name}.json"
 
-    # Guruhga: rasm va JSON
+    # --- 5) Guruhga: rasm (agar bor) + JSON (maydonlar bo‘sh bo‘lsa ham)
     try:
         if img_bytes:
             await bot.send_document(
                 GROUP_CHAT_ID,
                 BufferedInputFile(img_bytes, filename=img_name),
-                caption=f"🆕 Forma: {full_name}\n📞 {phone}\n👤 TG: {tg_id}"
+                caption=f"🆕 Forma: {full_name or '—'}\n📞 {phone or '—'}\n👤 TG: {tg_id_str or '—'}"
             )
         payload = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "tg_id": tg_id, "full_name": full_name, "phone": phone,
+            "tg_id": tg_id_str, "full_name": full_name, "phone": phone,
             "birth_date": birth_date, "birth_place": birth_place,
             "nationality": nationality, "party_membership": party_membership,
             "education": education, "university": university, "specialization": specialization,
@@ -384,28 +422,48 @@ async def send_resume_data(
             "work_experience": work_experience, "relatives": rels,
         }
         jb = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        await bot.send_document(GROUP_CHAT_ID, BufferedInputFile(jb, filename=json_name),
-                                caption=f"📄 JSON: {full_name}")
+        await bot.send_document(
+            GROUP_CHAT_ID,
+            BufferedInputFile(jb, filename=json_name),
+            caption=f"📄 JSON: {full_name or '—'}"
+        )
     except Exception as e:
         print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
 
-    # Mijozga
+    # --- 6) Mijozga yuborish (faqat tg_id haqiqiy bo‘lsa)
+    sent_to_user = False
     try:
-        chat_id = int(tg_id)
-        await bot.send_document(chat_id, BufferedInputFile(docx_bytes, filename=docx_name),
-                                caption="✅ Word formatdagi rezyume")
-        if pdf_bytes:
-            await bot.send_document(chat_id, BufferedInputFile(pdf_bytes, filename=pdf_name),
-                                    caption="✅ PDF formatdagi rezyume")
-        else:
-            await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
-    except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
+        chat_id = int(tg_id_str) if tg_id_str.strip() else None
+    except Exception:
+        chat_id = None
 
-    # WebApp yopish uchun flag
-    return {"status": "success", "close": True}
+    if chat_id:
+        try:
+            await bot.send_document(
+                chat_id,
+                BufferedInputFile(docx_bytes, filename=docx_name),
+                caption="✅ Word formatdagi rezyume"
+            )
+            if pdf_bytes:
+                await bot.send_document(
+                    chat_id,
+                    BufferedInputFile(pdf_bytes, filename=pdf_name),
+                    caption="✅ PDF formatdagi rezyume"
+                )
+            else:
+                await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
+            sent_to_user = True
+        except Exception as e:
+            print("USER SEND ERROR:", repr(e), file=sys.stderr)
+            # userga yuborolmasak ham 200 qaytaramiz
 
+    # --- 7) Har doim 200 OK qaytamiz (422 yo‘q), WebApp yopilishi uchun "close": True
+    return {
+        "status": "success",
+        "sent_to_user": sent_to_user,
+        "close": True
+    }
 
 # =========================
 # Bot commands
