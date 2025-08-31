@@ -1,3 +1,4 @@
+# app/main.py
 import os
 import io
 import re
@@ -29,6 +30,10 @@ from aiogram.filters import Command
 BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
+
+# Fayl limiti (faqat Telegram sessiyalariga qo‘llanadi; WebApp fotosiga tegmaymiz)
+MAX_FILE_MB = 10
+MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -127,7 +132,6 @@ def libre_convert(input_bytes: bytes, out_ext: str, in_name: str) -> Optional[by
     Generic LibreOffice convert: (docx|pptx|xlsx|pdf) -> out_ext
     """
     with tempfile.TemporaryDirectory() as td:
-        # Kiruvchi fayl nomini asl kengaytmasi bilan saqlaymiz
         base = os.path.basename(in_name) or "in.bin"
         in_path = os.path.join(td, base)
         with open(in_path, "wb") as f:
@@ -137,7 +141,6 @@ def libre_convert(input_bytes: bytes, out_ext: str, in_name: str) -> Optional[by
                 ["soffice", "--headless", "--convert-to", out_ext, "--outdir", td, in_path],
                 check=True
             )
-            # Chiqish nomi oldindan noma'lum bo‘lishi mumkin — topamiz
             out_path = None
             for fn in os.listdir(td):
                 if fn.lower().endswith(f".{out_ext}"):
@@ -276,7 +279,7 @@ def ocr_pdf_to_text(pdf_bytes: bytes, lang: str = "eng") -> str:
 
 
 # =========================
-# Resume form handler
+# Resume form handler (WebApp) — rasmga limit qo‘ymadik
 # =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
@@ -340,7 +343,7 @@ async def send_resume_data(
     img_ext = ".png"
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img_bytes = await photo.read()
+            img_bytes = await photo.read()  # WebApp uchun limit qo‘ymadik
             img_ext = pick_image_ext(photo.filename)
             if img_bytes:
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
@@ -400,6 +403,7 @@ async def send_resume_data(
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
 
+    # WebApp yopish uchun flag
     return {"status": "success", "close": True}
 
 
@@ -420,16 +424,16 @@ async def start_cmd(m: Message):
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
     await m.answer(
-        "Asosiy komandalar:\n"
+        "Asosiy komandalar (Telegram orqali fayl: max 10 MB):\n"
         "/new_resume – Web forma\n"
         "/pdf_split – PDF sahifalarni ajratish\n"
-        "/pdf_merge – Bir nechta PDFni qo‘shish\n"
-        "/pagenum – PDFga sahifa raqami qo‘shish\n"
-        "/watermark – PDFga watermark\n"
+        "/pdf_merge – PDF qo‘shish\n"
+        "/pagenum – Sahifa raqami qo‘shish\n"
+        "/watermark – Watermark qo‘shish\n"
         "/ocr – Skan PDFdan matn chiqarish\n"
         "/convert – DOCX/PPTX/XLSX/PDF konvertatsiya\n"
         "/translate – PDF matnini tarjima\n"
-        "/status – Sessiya holati\n"
+        "/status – Holat\n"
         "/cancel – Bekor\n"
         "/done – Yakunlash"
     )
@@ -477,37 +481,37 @@ async def cmd_cancel(m: Message):
 @dp.message(Command("pdf_split"))
 async def cmd_split(m: Message):
     new_session(m.from_user.id, "split")
-    await m.answer("✂️ PDF Split boshlandi.\n1) PDF yuboring.\n2) /range 1-3,7\nTugatish: /done | Holat: /status")
+    await m.answer("✂️ PDF Split boshlandi.\n1) PDF yuboring (max 10 MB).\n2) /range 1-3,7\nTugatish: /done | Holat: /status")
 
 
 @dp.message(Command("pdf_merge"))
 async def cmd_merge(m: Message):
     new_session(m.from_user.id, "merge")
-    await m.answer("🧷 PDF Merge boshlandi.\nKetma-ket PDF yuboring (hammasi qo‘shiladi).\nTugatish: /done | Holat: /status")
+    await m.answer("🧷 PDF Merge boshlandi.\nKetma-ket PDF yuboring (har biri max 10 MB).\nTugatish: /done | Holat: /status")
 
 
 @dp.message(Command("pagenum"))
 async def cmd_pagenum(m: Message):
     new_session(m.from_user.id, "pagenum")
-    await m.answer("🔢 Sahifa raqami sessiyasi.\n1) PDF yuboring.\n2) /pos bottom-right\nTugatish: /done | Holat: /status")
+    await m.answer("🔢 Sahifa raqami sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /pos bottom-right\nTugatish: /done | Holat: /status")
 
 
 @dp.message(Command("watermark"))
 async def cmd_watermark(m: Message):
     new_session(m.from_user.id, "watermark")
-    await m.answer("💧 Watermark sessiyasi.\n1) PDF yuboring.\n2) /wm Confidential\n(opsional) /pos bottom-right\nTugatish: /done")
+    await m.answer("💧 Watermark sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /wm Confidential\n(opsional) /pos bottom-right\nTugatish: /done")
 
 
 @dp.message(Command("ocr"))
 async def cmd_ocr(m: Message):
     new_session(m.from_user.id, "ocr")
-    await m.answer("🪄 OCR sessiyasi.\n1) Skan PDF yuboring.\n2) /lang eng (yoki uzb, rus ...)\nTugatish: /done")
+    await m.answer("🪄 OCR sessiyasi.\n1) Skan PDF yuboring (max 10 MB).\n2) /lang eng (yoki uzb, rus ...)\nTugatish: /done")
 
 
 @dp.message(Command("translate"))
 async def cmd_translate(m: Message):
     new_session(m.from_user.id, "translate")
-    await m.answer("🌐 Tarjima sessiyasi.\n1) PDF yuboring.\n2) /to uz (maqsad til)\nTugatish: /done")
+    await m.answer("🌐 Tarjima sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /to uz (maqsad til)\nTugatish: /done")
 
 
 @dp.message(Command("convert"))
@@ -515,7 +519,7 @@ async def cmd_convert(m: Message):
     new_session(m.from_user.id, "convert")
     await m.answer(
         "🔁 Konvert sessiyasi.\n"
-        "1) Bitta fayl yuboring (DOCX/PPTX/XLSX/PDF; PPTX→PNG uchun PPTX yuboring).\n"
+        "1) Bitta fayl yuboring (DOCX/PPTX/XLSX/PDF; max 10 MB).\n"
         "2) /target pdf | png | docx | pptx\n"
         "Qoida:\n"
         "• DOCX/PPTX/XLSX → PDF: /target pdf\n"
@@ -640,16 +644,33 @@ async def param_missing(m: Message, **data):
     await m.answer(f"Parametr yetishmayapti. {tips.get(cmd, '')}")
 
 
-# ---- Fayl qabul qilish
+# ---- Photo’ni bloklash (ixtiyoriy, lekin foydali)
+@dp.message(F.photo)
+async def reject_photo(m: Message):
+    await m.reply("🖼 Rasmni **Document (File)** sifatida yuboring. (Telegram orqali fayl limiti: 10 MB)")
+
+
+# ---- Fayl qabul qilish (LIMIT bilan)
 @dp.message(F.document)
 async def collect_file(m: Message):
     s = get_session(m.from_user.id)
     if not s:
         return
 
+    # LIMIT: yuklab OLMASDAN avval tekshiramiz
+    size_bytes = m.document.file_size or 0
+    if size_bytes > MAX_FILE_SIZE:
+        clear_session(m.from_user.id)
+        mb = size_bytes / (1024 * 1024)
+        return await m.reply(
+            f"❌ Fayl juda katta: {mb:.1f} MB. Maksimum {MAX_FILE_MB} MB.\n"
+            f"Jarayon bekor qilindi. Kichikroq fayl bilan qayta boshlang."
+        )
+
     name = m.document.file_name or "file.bin"
     mime = m.document.mime_type or "application/octet-stream"
 
+    # Endi xavfsiz yuklab olamiz
     data = None
     try:
         tg_file = await bot.get_file(m.document.file_id)
@@ -684,7 +705,10 @@ async def collect_file(m: Message):
         s["files"] = [{"name": name, "bytes": data, "mime": mime}]
         if op in {"split", "pagenum", "watermark", "ocr", "translate"} and mime != "application/pdf":
             return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.")
-        await m.reply(f"Fayl qabul qilindi: {name} ✅  (/status yoki parametr yuboring, keyin /done)")
+        await m.reply(
+            f"Fayl qabul qilindi: {name} ({human_size(len(data))}) ✅\n"
+            "(/status yoki parametr yuboring, keyin /done)"
+        )
 
 
 # ---- /done
