@@ -1,16 +1,23 @@
-aiogram>=3.6.0,<4.0.0
-fastapi>=0.112.0,<1.0.0
-uvicorn[standard]>=0.30.0,<1.0.0
-jinja2>=3.1.0,<4.0.0
-docxtpl>=0.16.7
-Pillow>=10.0.0
-python-multipart>=0.0.9
-pydantic>=2.8.0,<3.0.0
-sqlalchemy>=2.0
-asyncpg>=0.29
-pypdf>=4.2
-reportlab>=4.2
-pdf2image>=1.17
-pytesseract>=0.3.10
-pymupdf>=1.24
-deep-translator>=1.11
+# --- Core web & bot ---
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+aiogram==3.4.1
+jinja2==3.1.4
+python-multipart==0.0.9    # FastAPI: UploadFile/Form uchun shart
+
+# --- DOCX templating ---
+docxtpl==0.16.7
+python-docx==0.8.11        # docxtpl backend
+
+# --- PDF funksiyalar ---
+PyPDF2==3.0.1              # split/merge/extract
+reportlab==4.2.2           # watermark/pagenum overlay
+pdf2image==1.17.0          # PDF -> PNG (poppler utils kerak bo‘ladi, OS darajasida)
+pytesseract==0.3.10        # OCR (tesseract-ocr kerak, OS darajasida)
+Pillow==10.4.0             # rasm ishlovi (pdf2image/reportlabga kerak)
+
+# --- Tarjima (ixtiyoriy; o‘rnatilsa /translate onlayn ishlaydi) ---
+googletrans==4.0.0-rc1
+
+# --- Pydantic v2 bilan muvofiqlik (aiogram 3.x) ---
+pydantic>=2.7,<3
