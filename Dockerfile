@@ -11,14 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && fc-cache -f -v || true \
  && rm -rf /var/lib/apt/lists/*
 # --- OPTIONAL (Times New Roman) ---
-# Agar PDF’da Times New Roman almashib ketaversa, pastdagini ochib qo‘ying.
-RUN set -eux; \
-  sed -i 's/main/main contrib non-free non-free-firmware/g' /etc/apt/sources.list; \
-  apt-get update; \
-  echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections; \
-  apt-get install -y --no-install-recommends ttf-mscorefonts-installer; \
-  fc-cache -f -v; \
-  rm -rf /var/lib/apt/lists/*
+# # Agar PDF’da Times New Roman almashib ketaversa, pastdagini ochib qo‘ying.
+# RUN set -eux; \
+#   sed -i 's/main/main contrib non-free non-free-firmware/g' /etc/apt/sources.list; \
+#   apt-get update; \
+#   echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections; \
+#   apt-get install -y --no-install-recommends ttf-mscorefonts-installer; \
+#   fc-cache -f -v; \
+#   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
