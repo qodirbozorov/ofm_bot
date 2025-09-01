@@ -18,11 +18,14 @@ from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
-    Update, BotCommand, BufferedInputFile
-)
 from aiogram.filters import Command
+from aiogram.types import (
+    Message, Update, BufferedInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand
+)
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
 # =========================
 # CONFIG
@@ -31,7 +34,6 @@ BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
-# Fayl limiti (faqat Telegram sessiyalariga qo‘llanadi; WebApp fotosiga tegmaymiz)
 MAX_FILE_MB = 10
 MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
 
@@ -156,9 +158,7 @@ def libre_convert(input_bytes: bytes, out_ext: str, in_name: str) -> Optional[by
             return None
 
 
-# =========================
-# PDF helpers (lazy import!)
-# =========================
+# PDF helpers
 def pdf_split_bytes(pdf_bytes: bytes, range_str: str) -> Optional[bytes]:
     try:
         from PyPDF2 import PdfReader, PdfWriter
@@ -167,7 +167,7 @@ def pdf_split_bytes(pdf_bytes: bytes, range_str: str) -> Optional[bytes]:
         total = len(reader.pages)
 
         wanted: List[int] = []
-        for chunk in re.split(r"[,\s]+", range_str.strip()):
+        for chunk in re.split(r"[,\s]+", (range_str or "").strip()):
             if not chunk:
                 continue
             if "-" in chunk:
@@ -278,11 +278,40 @@ def ocr_pdf_to_text(pdf_bytes: bytes, lang: str = "eng") -> str:
         return ""
 
 
-# =========================
-# FORMA QABUL QILISH (422 yo‘q) — REPLACE OLD /send_resume_data WITH THIS
-# =========================
-from typing import Optional
+# Images → PDF page, and make any input become PDF bytes
+def image_to_pdf_page(img_bytes: bytes) -> Optional[bytes]:
+    try:
+        from PIL import Image
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.utils import ImageReader
 
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        w, h = img.size
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=(w, h))
+        c.drawImage(ImageReader(img), 0, 0, width=w, height=h,
+                    preserveAspectRatio=True, anchor='sw')
+        c.showPage()
+        c.save()
+        return packet.getvalue()
+    except Exception as e:
+        print("IMG->PDF ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+        return None
+
+
+def ensure_pdf_bytes(name: str, data: bytes, mime: str) -> Optional[bytes]:
+    ext = (os.path.splitext(name.lower())[1] or "")
+    if mime == "application/pdf" or ext == ".pdf":
+        return data
+    if mime in {"image/jpeg", "image/png", "image/webp"} or ext in {".jpg", ".jpeg", ".png", ".webp"}:
+        return image_to_pdf_page(data)
+    return None
+
+
+# =========================
+# WebApp (Resume) — 422 yo‘q, bo‘sh ham bo‘lsa ishlaydi
+# =========================
 @app.post("/send_resume_data")
 async def send_resume_data(
     full_name: Optional[str] = Form(None),
@@ -307,10 +336,8 @@ async def send_resume_data(
     work_experience: Optional[str] = Form(None),
     relatives: Optional[str] = Form(None),
 
-    # WebApp rasmini limitlamaymiz (sening so‘rovingga ko‘ra)
-    photo: UploadFile | None = None,
+    photo: UploadFile | None = None,  # WebApp rasmiga limit qo‘ymaymiz
 ):
-    # --- 0) Normallashtirish (None -> "")
     def nz(v, default=""):
         return v if v is not None else default
 
@@ -335,7 +362,6 @@ async def send_resume_data(
     current_position_full = nz(current_position_full)
     work_experience = nz(work_experience)
 
-    # relatives JSON -> list
     try:
         rels = json.loads(relatives) if relatives else []
         if not isinstance(rels, list):
@@ -343,13 +369,10 @@ async def send_resume_data(
     except Exception:
         rels = []
 
-    # --- 1) Template mavjudligini tekshir
     tpl_path = os.path.join(TEMPLATES_DIR, "resume.docx")
     if not os.path.exists(tpl_path):
-        # 422 o‘rniga 200 OK + status=error (web app alert uchun qulay)
         return JSONResponse({"status": "error", "error": "resume.docx template topilmadi"}, status_code=200)
 
-    # --- 2) DocxTpl context
     ctx = {
         "full_name": full_name,
         "phone": phone,
@@ -372,7 +395,6 @@ async def send_resume_data(
         "relatives": rels,
     }
 
-    # --- 3) DOCX render (+ rasm ixtiyoriy, limit YO‘Q)
     doc = DocxTemplate(tpl_path)
 
     inline_img = None
@@ -380,7 +402,7 @@ async def send_resume_data(
     img_ext = ".png"
     try:
         if photo is not None and getattr(photo, "filename", ""):
-            img_bytes = await photo.read()  # WebApp: limit qo‘ymaymiz
+            img_bytes = await photo.read()
             img_ext = pick_image_ext(photo.filename)
             if img_bytes:
                 inline_img = InlineImage(doc, io.BytesIO(img_bytes), width=Mm(35))
@@ -395,14 +417,13 @@ async def send_resume_data(
     docx_bytes = buf.getvalue()
     pdf_bytes = convert_docx_to_pdf(docx_bytes)
 
-    # --- 4) Fayl nomlari (bo‘sh bo‘lsa ham ishlayveradi)
     base_name = make_safe_basename(full_name or "user", phone or "NaN")
     docx_name = f"{base_name}_0.docx"
     pdf_name = f"{base_name}_0.pdf"
     img_name = f"{base_name}{img_ext}"
     json_name = f"{base_name}.json"
 
-    # --- 5) Guruhga: rasm (agar bor) + JSON (maydonlar bo‘sh bo‘lsa ham)
+    # Guruhga: rasm + JSON (har doim ok)
     try:
         if img_bytes:
             await bot.send_document(
@@ -431,8 +452,7 @@ async def send_resume_data(
         print("GROUP SEND ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
 
-    # --- 6) Mijozga yuborish (faqat tg_id haqiqiy bo‘lsa)
-    sent_to_user = False
+    # Foydalanuvchiga
     try:
         chat_id = int(tg_id_str) if tg_id_str.strip() else None
     except Exception:
@@ -440,295 +460,441 @@ async def send_resume_data(
 
     if chat_id:
         try:
-            await bot.send_document(
-                chat_id,
-                BufferedInputFile(docx_bytes, filename=docx_name),
-                caption="✅ Word formatdagi rezyume"
-            )
+            await bot.send_document(chat_id, BufferedInputFile(docx_bytes, filename=docx_name),
+                                    caption="✅ Word formatdagi rezyume")
             if pdf_bytes:
-                await bot.send_document(
-                    chat_id,
-                    BufferedInputFile(pdf_bytes, filename=pdf_name),
-                    caption="✅ PDF formatdagi rezyume"
-                )
+                await bot.send_document(chat_id, BufferedInputFile(pdf_bytes, filename=pdf_name),
+                                        caption="✅ PDF formatdagi rezyume")
             else:
                 await bot.send_message(chat_id, "⚠️ PDF konvertda xatolik, hozircha faqat Word yuborildi.")
-            sent_to_user = True
         except Exception as e:
             print("USER SEND ERROR:", repr(e), file=sys.stderr)
-            # userga yuborolmasak ham 200 qaytaramiz
 
-    # --- 7) Har doim 200 OK qaytamiz (422 yo‘q), WebApp yopilishi uchun "close": True
-    return {
-        "status": "success",
-        "sent_to_user": sent_to_user,
-        "close": True
-    }
+    return {"status": "success", "close": True}
+
 
 # =========================
-# Bot commands
+# Reply Keyboards (bottom)
+# =========================
+BTN_NEW = "🧾 Yangi Rezyume"
+BTN_SPLIT = "✂️ PDF Split"
+BTN_MERGE = "🧷 PDF Merge"
+BTN_PAGENUM = "🔢 Page Numbers"
+BTN_WM = "💧 Watermark"
+BTN_OCR = "🪄 OCR"
+BTN_CONVERT = "🔁 Convert"
+BTN_TRANSLATE = "🌐 Translate"
+BTN_HELP = "ℹ️ Help"
+BTN_CANCEL = "❌ Cancel"
+BTN_BACK = "↩️ Back"
+BTN_DONE = "✅ Yakunlash"
+
+# Param buttons
+BTN_SET_RANGE = "🧭 Set Range"
+BTN_SET_WM_TEXT = "📝 Set Text"
+BTN_SET_LANG = "🌍 Set Language"
+BTN_SET_TRG_LANG = "🌐 Set Target Lang"
+BTN_TARGET_PDF = "🎯 Target: PDF"
+BTN_TARGET_PNG = "🎯 Target: PNG"
+BTN_TARGET_DOCX = "🎯 Target: DOCX"
+BTN_TARGET_PPTX = "🎯 Target: PPTX"
+
+# Positions
+BTN_TL = "↖️ Top-Left"; BTN_TC = "⬆️ Top-Center"; BTN_TR = "↗️ Top-Right"
+BTN_BL = "↙️ Bottom-Left"; BTN_BC = "⬇️ Bottom-Center"; BTN_BR = "↘️ Bottom-Right"
+
+
+def kb_main() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_NEW)],
+            [KeyboardButton(text=BTN_SPLIT), KeyboardButton(text=BTN_MERGE)],
+            [KeyboardButton(text=BTN_PAGENUM), KeyboardButton(text=BTN_WM), KeyboardButton(text=BTN_OCR)],
+            [KeyboardButton(text=BTN_CONVERT), KeyboardButton(text=BTN_TRANSLATE)],
+            [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Funksiyani tanlang…",
+        one_time_keyboard=False
+    )
+
+
+def kb_split() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SET_RANGE), KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_merge() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_pagenum() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_TL), KeyboardButton(text=BTN_TC), KeyboardButton(text=BTN_TR)],
+            [KeyboardButton(text=BTN_BL), KeyboardButton(text=BTN_BC), KeyboardButton(text=BTN_BR)],
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_watermark() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SET_WM_TEXT)],
+            [KeyboardButton(text=BTN_TL), KeyboardButton(text=BTN_TC), KeyboardButton(text=BTN_TR)],
+            [KeyboardButton(text=BTN_BL), KeyboardButton(text=BTN_BC), KeyboardButton(text=BTN_BR)],
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_ocr() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SET_LANG)],
+            [KeyboardButton(text="eng"), KeyboardButton(text="uzb"), KeyboardButton(text="rus")],
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_convert() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_TARGET_PDF), KeyboardButton(text=BTN_TARGET_PNG)],
+            [KeyboardButton(text=BTN_TARGET_DOCX), KeyboardButton(text=BTN_TARGET_PPTX)],
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def kb_translate() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SET_TRG_LANG)],
+            [KeyboardButton(text="uz"), KeyboardButton(text="ru"), KeyboardButton(text="en")],
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True
+    )
+
+
+# =========================
+# FSM States (free text inputs)
+# =========================
+class SplitRangeSG(StatesGroup):
+    waiting = State()
+
+
+class WMTextSG(StatesGroup):
+    waiting = State()
+
+
+class LangSG(StatesGroup):
+    waiting = State()
+
+
+class TargetLangSG(StatesGroup):
+    waiting = State()
+
+
+# =========================
+# Bot: Menu & flows
 # =========================
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
     ACTIVE_USERS.add(m.from_user.id)
     await m.answer(
         f"👥 {len(ACTIVE_USERS)}- nafar faol foydalanuvchi\n\n"
-        "/new_resume - Yangi obektivka\n"
-        "/help - Yordam\n\n"
-        "@octagon_print"
+        "Quyidagi menyudan funksiyani tanlang. Fayl yuborishda limit: 10 MB.",
+        reply_markup=kb_main()
     )
 
 
+@dp.message(F.text == BTN_HELP)
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
     await m.answer(
-        "Asosiy komandalar (Telegram orqali fayl: max 10 MB):\n"
-        "/new_resume – Web forma\n"
-        "/pdf_split – PDF sahifalarni ajratish\n"
-        "/pdf_merge – PDF qo‘shish\n"
-        "/pagenum – Sahifa raqami qo‘shish\n"
-        "/watermark – Watermark qo‘shish\n"
-        "/ocr – Skan PDFdan matn chiqarish\n"
-        "/convert – DOCX/PPTX/XLSX/PDF konvertatsiya\n"
-        "/translate – PDF matnini tarjima\n"
-        "/status – Holat\n"
-        "/cancel – Bekor\n"
-        "/done – Yakunlash"
+        "📌 Qisqa qo‘llanma:\n"
+        "• 🧾 Yangi Rezyume: Web formani ochadi va tayyor DOCX/PDF ni yuboradi.\n"
+        "• ✂️ Split: PDF yuboring → Range berasiz → Yakunlash.\n"
+        "• 🧷 Merge: Bir nechta PDF yuboring → Yakunlash.\n"
+        "• 🔢 Page Numbers: PDF yuboring → joylashuvni tanlang → Yakunlash.\n"
+        "• 💧 Watermark: PDF yuboring → matn va joylashuv → Yakunlash.\n"
+        "• 🪄 OCR: Skan PDF yuboring → til tanlang → Yakunlash.\n"
+        "• 🔁 Convert: JPG/PNG/PDF ko‘p faylni bir PDFga yoki Office → PDF, PPTX/PDF → PNG.\n"
+        "• 🌐 Translate: PDFdan text olib maqsad tilga tarjima.\n"
+        "Bekor qilish: ❌ Cancel, Ortga: ↩️ Back",
+        reply_markup=kb_main()
     )
 
 
+@dp.message(F.text == BTN_NEW)
 @dp.message(Command("new_resume"))
 async def new_resume_cmd(m: Message):
     base = (APP_BASE or "").rstrip("/")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text="Obyektivkani to‘ldirish",
+            text="🌐 Obyektivkani to‘ldirish",
             web_app=WebAppInfo(url=f"{base}/form?id={m.from_user.id}")
         )
     ]])
     await m.answer(
         "👋 Assalomu alaykum!\n📄 Obyektivka (ma’lumotnoma)\n"
-        "✅ Tez\n✅ Oson\n✅ Ishonchli\nquyidagi 🌐 web formani to'ldiring\n👇👇👇👇👇👇👇👇👇",
+        "✅ Tez\n✅ Oson\n✅ Ishonchli\nQuyidagi web formani to‘ldiring:",
         reply_markup=kb
     )
 
 
-# ---- Session starters
-@dp.message(Command("status"))
-async def cmd_status(m: Message):
-    s = get_session(m.from_user.id)
-    if not s:
-        return await m.answer("❌ Sessiya yo‘q. /pdf_split, /pdf_merge, /convert … dan boshlang.")
-    files_info = "—"
-    if s["files"]:
-        files_info = "\n".join([f" {i+1}) {f['name']} ({human_size(len(f['bytes']))})"
-                                for i, f in enumerate(s["files"])])
-    params_info = "Parametrlar hali yo‘q" if not s["params"] else json.dumps(s["params"], ensure_ascii=False)
+@dp.message(F.text == BTN_CANCEL)
+async def cancel_flow(m: Message, state: FSMContext):
+    await state.clear()
+    clear_session(m.from_user.id)
+    await m.answer("❌ Jarayon bekor qilindi.", reply_markup=kb_main())
+
+
+@dp.message(F.text == BTN_BACK)
+async def back_to_menu(m: Message, state: FSMContext):
+    await state.clear()
+    clear_session(m.from_user.id)
+    await m.answer("↩️ Asosiy menyu.", reply_markup=kb_main())
+
+
+@dp.message(F.text == BTN_SPLIT)
+async def flow_split(m: Message, state: FSMContext):
+    await state.clear()
+    new_session(m.from_user.id, "split")
     await m.answer(
-        f"🧩 Jarayon: {s['op']}\n📎 Fayllar: {len(s['files'])}\n{files_info}\n"
-        f"⚙️ Parametrlar: {params_info}\nYakunlash: /done | Bekor: /cancel"
+        "✂️ PDF Split boshlandi.\n1) PDF yuboring (max 10 MB)\n2) 🧭 Set Range (masalan: 1-3,7)\n3) ✅ Yakunlash",
+        reply_markup=kb_split()
     )
 
 
-@dp.message(Command("cancel"))
-async def cmd_cancel(m: Message):
-    clear_session(m.from_user.id)
-    await m.answer("❌ Session bekor qilindi.")
-
-
-@dp.message(Command("pdf_split"))
-async def cmd_split(m: Message):
-    new_session(m.from_user.id, "split")
-    await m.answer("✂️ PDF Split boshlandi.\n1) PDF yuboring (max 10 MB).\n2) /range 1-3,7\nTugatish: /done | Holat: /status")
-
-
-@dp.message(Command("pdf_merge"))
-async def cmd_merge(m: Message):
+@dp.message(F.text == BTN_MERGE)
+async def flow_merge(m: Message, state: FSMContext):
+    await state.clear()
     new_session(m.from_user.id, "merge")
-    await m.answer("🧷 PDF Merge boshlandi.\nKetma-ket PDF yuboring (har biri max 10 MB).\nTugatish: /done | Holat: /status")
+    await m.answer(
+        "🧷 PDF Merge boshlandi.\nKetma-ket PDF yuboring (har biri max 10 MB), so‘ng ✅ Yakunlash.",
+        reply_markup=kb_merge()
+    )
 
 
-@dp.message(Command("pagenum"))
-async def cmd_pagenum(m: Message):
+@dp.message(F.text == BTN_PAGENUM)
+async def flow_pagenum(m: Message, state: FSMContext):
+    await state.clear()
     new_session(m.from_user.id, "pagenum")
-    await m.answer("🔢 Sahifa raqami sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /pos bottom-right\nTugatish: /done | Holat: /status")
+    await m.answer(
+        "🔢 Sahifa raqami sessiyasi.\n1) PDF yuboring (max 10 MB)\n2) Joylashuvni tanlang\n3) ✅ Yakunlash",
+        reply_markup=kb_pagenum()
+    )
 
 
-@dp.message(Command("watermark"))
-async def cmd_watermark(m: Message):
+@dp.message(F.text == BTN_WM)
+async def flow_wm(m: Message, state: FSMContext):
+    await state.clear()
     new_session(m.from_user.id, "watermark")
-    await m.answer("💧 Watermark sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /wm Confidential\n(opsional) /pos bottom-right\nTugatish: /done")
+    await m.answer(
+        "💧 Watermark sessiyasi.\n1) PDF yuboring (max 10 MB)\n2) 📝 Set Text\n3) Joylashuvni tanlang\n4) ✅ Yakunlash",
+        reply_markup=kb_watermark()
+    )
 
 
-@dp.message(Command("ocr"))
-async def cmd_ocr(m: Message):
+@dp.message(F.text == BTN_OCR)
+async def flow_ocr(m: Message, state: FSMContext):
+    await state.clear()
     new_session(m.from_user.id, "ocr")
-    await m.answer("🪄 OCR sessiyasi.\n1) Skan PDF yuboring (max 10 MB).\n2) /lang eng (yoki uzb, rus ...)\nTugatish: /done")
+    await m.answer(
+        "🪄 OCR sessiyasi.\n1) Skan PDF yuboring (max 10 MB)\n2) 🌍 Set Language (eng/uzb/rus)\n3) ✅ Yakunlash",
+        reply_markup=kb_ocr()
+    )
 
 
-@dp.message(Command("translate"))
-async def cmd_translate(m: Message):
-    new_session(m.from_user.id, "translate")
-    await m.answer("🌐 Tarjima sessiyasi.\n1) PDF yuboring (max 10 MB).\n2) /to uz (maqsad til)\nTugatish: /done")
-
-
-@dp.message(Command("convert"))
-async def cmd_convert(m: Message):
+@dp.message(F.text == BTN_CONVERT)
+async def flow_convert(m: Message, state: FSMContext):
+    await state.clear()
     new_session(m.from_user.id, "convert")
     await m.answer(
-        "🔁 Konvert sessiyasi.\n"
-        "1) Bitta fayl yuboring (DOCX/PPTX/XLSX/PDF; max 10 MB).\n"
-        "2) /target pdf | png | docx | pptx\n"
-        "Qoida:\n"
-        "• DOCX/PPTX/XLSX → PDF: /target pdf\n"
-        "• PPTX → PNG (1-slayd), PDF → PNG (1-sahifa): /target png\n"
-        "• PDF → DOCX/PPTX qo‘llanmaydi\n"
-        "Tugatish: /done"
+        "🔁 Convert sessiyasi.\n"
+        "• Ko‘p JPG/PNG/PDF yuborsangiz → 🎯 Target: PDF → ✅ Yakunlash (hammasi bitta PDF bo‘ladi).\n"
+        "• Yagona DOCX/PPTX/XLSX yuborsangiz → 🎯 Target: PDF → ✅ Yakunlash.\n"
+        "• PPTX/PDF → 🎯 Target: PNG → ✅ Yakunlash (1-sahifa/slayd).\n"
+        "Fayl yuboring (har biri max 10 MB), so‘ng targetni tanlang.",
+        reply_markup=kb_convert()
     )
 
 
-# ---- Parametrlar (regex-agnostik)
-RE_RANGE  = re.compile(r"^/range\s+(.+)$")
-RE_POS    = re.compile(r"^/pos\s+(\S+)$")
-RE_WM     = re.compile(r"^/wm\s+(.+)$")
-RE_TARGET = re.compile(r"^/target\s+(\S+)$")
-RE_LANG   = re.compile(r"^/lang\s+(\S+)$")
-RE_TO     = re.compile(r"^/to\s+(\S+)$")
-RE_MISS   = re.compile(r"^/(range|pos|wm|target|lang|to)\s*$")
+@dp.message(F.text == BTN_TRANSLATE)
+async def flow_translate(m: Message, state: FSMContext):
+    await state.clear()
+    new_session(m.from_user.id, "translate")
+    await m.answer(
+        "🌐 Tarjima sessiyasi.\n1) PDF yuboring (max 10 MB)\n2) 🌐 Set Target Lang (masalan: uz/ru/en)\n3) ✅ Yakunlash",
+        reply_markup=kb_translate()
+    )
 
 
-def _get_match(message: Message, data: dict, pattern: re.Pattern):
-    mobj = data.get("regexp") or data.get("match")
-    if mobj:
-        return mobj
-    txt = (message.text or "").strip()
-    return pattern.match(txt)
-
-
-@dp.message(F.text.regexp(RE_RANGE))
-async def param_range(m: Message, **data):
+@dp.message(F.text == BTN_SET_RANGE)
+async def ask_range(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "split":
-        return await m.answer("Bu parametr /pdf_split sessiyasida.")
-    mo = _get_match(m, data, RE_RANGE)
-    if not mo:
-        return await m.answer("Format: /range 1-3,7")
-    s["params"]["range"] = mo.group(1).strip()
-    await m.answer("✅ Oraliq qabul qilindi. /status yoki /done")
+        return await m.answer("Bu parametr Split sessiyasida ishlaydi.", reply_markup=kb_main())
+    await state.set_state(SplitRangeSG.waiting)
+    await m.answer("Oraliq kiriting (masalan: 1-3,7):")
 
 
-@dp.message(F.text.regexp(RE_POS))
-async def param_pos(m: Message, **data):
+@dp.message(SplitRangeSG.waiting, F.text)
+async def got_range(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
-    if not s or s["op"] not in {"pagenum", "watermark"}:
-        return await m.answer("Bu parametr /pagenum yoki /watermark sessiyalarida.")
-    mo = _get_match(m, data, RE_POS)
-    if not mo:
-        return await m.answer("Format: /pos bottom-right")
-    pos = mo.group(1).strip().lower()
-    allowed = {"bottom-right","bottom-left","bottom-center","top-right","top-left","top-center"}
-    if pos not in allowed:
-        return await m.answer("Ruxsat etilgan: " + ", ".join(sorted(allowed)))
-    s["params"]["pos"] = pos
-    await m.answer("✅ Pozitsiya qabul qilindi.")
+    if not s:  # ehtiyot
+        await state.clear()
+        return await m.answer("Sessiya topilmadi.", reply_markup=kb_main())
+    s["params"]["range"] = (m.text or "").strip()
+    await state.clear()
+    await m.answer("✅ Oraliq qabul qilindi.", reply_markup=kb_split())
 
 
-@dp.message(F.text.regexp(RE_WM))
-async def param_wm(m: Message, **data):
+@dp.message(F.text == BTN_SET_WM_TEXT)
+async def ask_wm(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "watermark":
-        return await m.answer("Bu parametr /watermark sessiyasida.")
-    mo = _get_match(m, data, RE_WM)
-    if not mo:
-        return await m.answer("Format: /wm Confidential")
-    text = mo.group(1).strip()
-    if not text:
-        return await m.answer("Matn bo‘sh bo‘lmasin.")
-    s["params"]["wm"] = text[:100]
-    await m.answer("✅ Watermark matni qabul qilindi.")
+        return await m.answer("Bu parametr Watermark sessiyasida ishlaydi.", reply_markup=kb_main())
+    await state.set_state(WMTextSG.waiting)
+    await m.answer("Watermark matnini kiriting (masalan: Confidential):")
 
 
-@dp.message(F.text.regexp(RE_TARGET))
-async def param_target(m: Message, **data):
+@dp.message(WMTextSG.waiting, F.text)
+async def got_wm(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
-    if not s or s["op"] != "convert":
-        return await m.answer("Bu parametr /convert sessiyasida.")
-    mo = _get_match(m, data, RE_TARGET)
-    if not mo:
-        return await m.answer("Format: /target pdf|png|docx|pptx")
-    target = mo.group(1).strip().lower()
-    if target not in {"pdf","png","docx","pptx"}:
-        return await m.answer("Maqsad format: pdf | png | docx | pptx")
-    s["params"]["target"] = target
-    await m.answer("✅ Maqsad format qabul qilindi.")
+    if not s:
+        await state.clear()
+        return await m.answer("Sessiya topilmadi.", reply_markup=kb_main())
+    txt = (m.text or "").strip()
+    if not txt:
+        return await m.answer("Matn bo‘sh bo‘lmasin.")
+    s["params"]["wm"] = txt[:100]
+    await state.clear()
+    await m.answer("✅ Watermark matni qabul qilindi.", reply_markup=kb_watermark())
 
 
-@dp.message(F.text.regexp(RE_LANG))
-async def param_lang(m: Message, **data):
+# Pozitsiya tanlovlari (pagenum va watermark)
+POS_MAP = {
+    BTN_TL: "top-left", BTN_TC: "top-center", BTN_TR: "top-right",
+    BTN_BL: "bottom-left", BTN_BC: "bottom-center", BTN_BR: "bottom-right",
+}
+
+@dp.message(F.text.in_(list(POS_MAP.keys())))
+async def set_position(m: Message):
+    s = get_session(m.from_user.id)
+    if not s or s["op"] not in {"pagenum", "watermark"}:
+        return await m.answer("Joylashuv tanlash bu sessiyada emas.", reply_markup=kb_main())
+    s["params"]["pos"] = POS_MAP[m.text]
+    await m.answer(f"✅ Pozitsiya: {POS_MAP[m.text]}", reply_markup=kb_pagenum() if s["op"]=="pagenum" else kb_watermark())
+
+
+@dp.message(F.text == BTN_SET_LANG)
+async def ask_lang(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "ocr":
-        return await m.answer("Bu parametr /ocr sessiyasida.")
-    mo = _get_match(m, data, RE_LANG)
-    if not mo:
-        return await m.answer("Format: /lang eng")
-    s["params"]["lang"] = mo.group(1).strip()
-    await m.answer("✅ Til qabul qilindi.")
+        return await m.answer("Bu parametr OCR sessiyasida ishlaydi.", reply_markup=kb_main())
+    await state.set_state(LangSG.waiting)
+    await m.answer("Til kiriting (masalan: eng, uzb, rus):", reply_markup=kb_ocr())
 
 
-@dp.message(F.text.regexp(RE_TO))
-async def param_to(m: Message, **data):
+@dp.message(LangSG.waiting, F.text)
+async def got_lang(m: Message, state: FSMContext):
+    s = get_session(m.from_user.id)
+    if not s:
+        await state.clear()
+        return await m.answer("Sessiya topilmadi.", reply_markup=kb_main())
+    s["params"]["lang"] = (m.text or "").strip()
+    await state.clear()
+    await m.answer("✅ Til qabul qilindi.", reply_markup=kb_ocr())
+
+
+@dp.message(F.text == BTN_SET_TRG_LANG)
+async def ask_to_lang(m: Message, state: FSMContext):
     s = get_session(m.from_user.id)
     if not s or s["op"] != "translate":
-        return await m.answer("Bu parametr /translate sessiyasida.")
-    mo = _get_match(m, data, RE_TO)
-    if not mo:
-        return await m.answer("Format: /to uz")
-    s["params"]["to"] = mo.group(1).strip()
-    await m.answer("✅ Maqsad til qabul qilindi.")
+        return await m.answer("Bu parametr Translate sessiyasida ishlaydi.", reply_markup=kb_main())
+    await state.set_state(TargetLangSG.waiting)
+    await m.answer("Maqsad til kodini kiriting (uz/ru/en ...):", reply_markup=kb_translate())
 
 
-@dp.message(F.text.regexp(RE_MISS))
-async def param_missing(m: Message, **data):
-    mo = _get_match(m, data, RE_MISS)
-    cmd = mo.group(1) if mo else ""
-    tips = {
-        "range":  "Masalan: /range 1-3,7",
-        "pos":    "Masalan: /pos bottom-right",
-        "wm":     "Masalan: /wm Confidential",
-        "target": "Masalan: /target pdf|png|docx|pptx",
-        "lang":   "Masalan: /lang eng",
-        "to":     "Masalan: /to uz",
+@dp.message(TargetLangSG.waiting, F.text)
+async def got_to_lang(m: Message, state: FSMContext):
+    s = get_session(m.from_user.id)
+    if not s:
+        await state.clear()
+        return await m.answer("Sessiya topilmadi.", reply_markup=kb_main())
+    s["params"]["to"] = (m.text or "").strip()
+    await state.clear()
+    await m.answer("✅ Maqsad til qabul qilindi.", reply_markup=kb_translate())
+
+
+# Convert target tanlovlari
+@dp.message(F.text.in_([BTN_TARGET_PDF, BTN_TARGET_PNG, BTN_TARGET_DOCX, BTN_TARGET_PPTX]))
+async def set_target(m: Message):
+    s = get_session(m.from_user.id)
+    if not s or s["op"] != "convert":
+        return await m.answer("Maqsad format bu sessiyada emas.", reply_markup=kb_main())
+    mapping = {
+        BTN_TARGET_PDF: "pdf",
+        BTN_TARGET_PNG: "png",
+        BTN_TARGET_DOCX: "docx",
+        BTN_TARGET_PPTX: "pptx",
     }
-    await m.answer(f"Parametr yetishmayapti. {tips.get(cmd, '')}")
+    s["params"]["target"] = mapping[m.text]
+    await m.answer(f"✅ Target: {mapping[m.text].upper()}", reply_markup=kb_convert())
 
 
-# ---- Photo’ni bloklash (ixtiyoriy, lekin foydali)
+# Photo’ni bloklash
 @dp.message(F.photo)
 async def reject_photo(m: Message):
     await m.reply("🖼 Rasmni **Document (File)** sifatida yuboring. (Telegram orqali fayl limiti: 10 MB)")
 
 
-# ---- Fayl qabul qilish (LIMIT bilan)
+# Fayl qabul qilish (LIMIT bilan)
 @dp.message(F.document)
 async def collect_file(m: Message):
     s = get_session(m.from_user.id)
     if not s:
         return
 
-    # LIMIT: yuklab OLMASDAN avval tekshiramiz
     size_bytes = m.document.file_size or 0
     if size_bytes > MAX_FILE_SIZE:
         clear_session(m.from_user.id)
         mb = size_bytes / (1024 * 1024)
         return await m.reply(
             f"❌ Fayl juda katta: {mb:.1f} MB. Maksimum {MAX_FILE_MB} MB.\n"
-            f"Jarayon bekor qilindi. Kichikroq fayl bilan qayta boshlang."
+            f"Jarayon bekor qilindi. Kichikroq fayl bilan qayta boshlang.",
+            reply_markup=kb_main()
         )
 
     name = m.document.file_name or "file.bin"
     mime = m.document.mime_type or "application/octet-stream"
 
-    # Endi xavfsiz yuklab olamiz
     data = None
     try:
         tg_file = await bot.get_file(m.document.file_id)
@@ -753,80 +919,114 @@ async def collect_file(m: Message):
         return await m.reply("❌ Faylni qabul qilib bo‘lmadi.")
 
     op = s["op"]
+
     if op == "merge":
         if mime != "application/pdf":
-            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.")
+            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.", reply_markup=kb_merge())
         s["files"].append({"name": name, "bytes": data, "mime": mime})
-        return await m.reply(f"Qo‘shildi ✅  ({name})  — jami: {len(s['files'])}")
+        return await m.reply(f"Qo‘shildi ✅  ({name})  — jami: {len(s['files'])}", reply_markup=kb_merge())
 
-    if op in {"split", "pagenum", "watermark", "ocr", "translate", "convert"}:
+    if op in {"split", "pagenum", "watermark", "ocr", "translate"}:
         s["files"] = [{"name": name, "bytes": data, "mime": mime}]
-        if op in {"split", "pagenum", "watermark", "ocr", "translate"} and mime != "application/pdf":
-            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.")
+        if mime != "application/pdf":
+            return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.",
+                                 reply_markup=kb_pagenum() if op=="pagenum" else
+                                             (kb_watermark() if op=="watermark" else
+                                              (kb_ocr() if op=="ocr" else kb_translate())))
         await m.reply(
             f"Fayl qabul qilindi: {name} ({human_size(len(data))}) ✅\n"
-            "(/status yoki parametr yuboring, keyin /done)"
+            "Parametr(lar)ni tanlang, so‘ng ✅ Yakunlash.",
+            reply_markup=kb_pagenum() if op=="pagenum" else
+                        (kb_watermark() if op=="watermark" else
+                         (kb_ocr() if op=="ocr" else kb_translate()))
         )
+        return
+
+    if op == "convert":
+        ext = (os.path.splitext(name)[1] or "").lower()
+        is_pdf_or_img = (mime == "application/pdf" or ext == ".pdf" or
+                         mime in {"image/jpeg","image/png","image/webp"} or
+                         ext in {".jpg",".jpeg",".png",".webp"})
+        is_office = ext in {".docx",".pptx",".xlsx"}
+
+        if is_office:
+            if s["files"]:
+                return await m.reply("DOCX/PPTX/XLSX bitta fayl bo‘lishi kerak. ❌ Cancel qilib qayta boshlang.",
+                                     reply_markup=kb_convert())
+            s["files"] = [{"name": name, "bytes": data, "mime": mime}]
+            return await m.reply(f"Fayl qabul qilindi: {name} ({human_size(len(data))}) ✅\n"
+                                 f"{BTN_TARGET_PDF} tanlab, so‘ng {BTN_DONE}.",
+                                 reply_markup=kb_convert())
+
+        if is_pdf_or_img:
+            s["files"].append({"name": name, "bytes": data, "mime": mime})
+            return await m.reply(
+                f"Qo‘shildi ✅  ({name})  — jami: {len(s['files'])}\n"
+                f"{BTN_TARGET_PDF} tanlab, so‘ng {BTN_DONE}.",
+                reply_markup=kb_convert()
+            )
+
+        return await m.reply("Qo‘llanadigan turlar: PDF, JPG, PNG, WEBP yoki bitta DOCX/PPTX/XLSX.",
+                             reply_markup=kb_convert())
 
 
-# ---- /done
-@dp.message(Command("done"))
-async def cmd_done(m: Message):
+@dp.message(F.text == BTN_DONE)
+async def done_handler(m: Message):
     s = get_session(m.from_user.id)
     if not s:
-        return await m.answer("Sessiya yo‘q.")
+        return await m.answer("Sessiya yo‘q.", reply_markup=kb_main())
 
     op = s["op"]; files = s["files"]; p = s["params"]
 
     try:
         if op == "split":
-            if not files: return await m.answer("PDF yuboring.")
-            if "range" not in p: return await m.answer("Oraliq kerak: /range 1-3,7")
+            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_split())
+            if "range" not in p: return await m.answer("🧭 Set Range tanlang.", reply_markup=kb_split())
             out = pdf_split_bytes(files[0]["bytes"], p["range"])
-            if not out: return await m.answer("Ajratishda xatolik.")
+            if not out: return await m.answer("Ajratishda xatolik.", reply_markup=kb_split())
             await bot.send_document(m.chat.id, BufferedInputFile(out, filename="split.pdf"),
                                     caption="✅ Split tayyor")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "merge":
-            if len(files) < 2: return await m.answer("Kamida 2 ta PDF yuboring.")
+            if len(files) < 2: return await m.answer("Kamida 2 ta PDF yuboring.", reply_markup=kb_merge())
             out = pdf_merge_bytes([f["bytes"] for f in files])
-            if not out: return await m.answer("Merge xatolik.")
+            if not out: return await m.answer("Merge xatolik.", reply_markup=kb_merge())
             await bot.send_document(m.chat.id, BufferedInputFile(out, filename="merge.pdf"),
                                     caption="✅ Merge tayyor")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "pagenum":
-            if not files: return await m.answer("PDF yuboring.")
+            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_pagenum())
             pos = p.get("pos", "bottom-right")
             out = pdf_overlay_text(files[0]["bytes"], text="{page}", pos=pos, font_size=10)
-            if not out: return await m.answer("Sahifa raqami qo‘shishda xatolik.")
+            if not out: return await m.answer("Sahifa raqami qo‘shishda xatolik.", reply_markup=kb_pagenum())
             await bot.send_document(m.chat.id, BufferedInputFile(out, filename="pagenum.pdf"),
                                     caption="✅ Sahifa raqamlari qo‘shildi")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "watermark":
-            if not files: return await m.answer("PDF yuboring.")
+            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_watermark())
             wm = p.get("wm")
-            if not wm: return await m.answer("Matn bering: /wm Confidential")
+            if not wm: return await m.answer("📝 Set Text tanlang.", reply_markup=kb_watermark())
             pos = p.get("pos", "bottom-right")
             out = pdf_overlay_text(files[0]["bytes"], text=wm, pos=pos, font_size=14)
-            if not out: return await m.answer("Watermarkda xatolik.")
+            if not out: return await m.answer("Watermarkda xatolik.", reply_markup=kb_watermark())
             await bot.send_document(m.chat.id, BufferedInputFile(out, filename="watermark.pdf"),
                                     caption="✅ Watermark qo‘shildi")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "ocr":
-            if not files: return await m.answer("PDF yuboring.")
+            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_ocr())
             lang = p.get("lang", "eng")
             txt = ocr_pdf_to_text(files[0]["bytes"], lang=lang)
-            if not txt: return await m.answer("OCR natijasi bo‘sh. /lang eng sinab ko‘ring.")
+            if not txt: return await m.answer("OCR natijasi bo‘sh. Tilni tekshiring.", reply_markup=kb_ocr())
             await bot.send_document(m.chat.id, BufferedInputFile(txt.encode("utf-8"), filename="ocr.txt"),
                                     caption=f"✅ OCR tayyor (lang={lang})")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "translate":
-            if not files: return await m.answer("PDF yuboring.")
+            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_translate())
             to = p.get("to", "uz")
             try:
                 from PyPDF2 import PdfReader
@@ -835,7 +1035,7 @@ async def cmd_done(m: Message):
             except Exception:
                 src_text = ""
             if not src_text:
-                return await m.answer("PDFdan matn olinmadi. Avval /ocr bilan text oling.")
+                return await m.answer("PDFdan matn olinmadi. Avval OCR qilib ko‘ring.", reply_markup=kb_translate())
             out_text = src_text
             try:
                 from googletrans import Translator
@@ -846,31 +1046,52 @@ async def cmd_done(m: Message):
             await bot.send_document(m.chat.id, BufferedInputFile(out_text.encode("utf-8"),
                                                                  filename=f"translate_{to}.txt"),
                                     caption=f"✅ Tarjima tayyor (->{to})")
-            clear_session(m.from_user.id); return
+            clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "convert":
-            if not files: return await m.answer("Fayl yuboring.")
-            target = p.get("target")
-            if target not in {"pdf","png","docx","pptx"}:
-                return await m.answer("Maqsad format: /target pdf|png|docx|pptx")
-
+            if not files: return await m.answer("Fayl yuboring.", reply_markup=kb_convert())
+            target = p.get("target", "pdf")
             name = files[0]["name"].lower()
             data = files[0]["bytes"]
 
+            # A) Target PDF va ko‘p rasm/PDF → bitta PDF
+            if target == "pdf" and (len(files) > 1 or any(
+                (f["mime"] != "application/pdf" and os.path.splitext(f["name"].lower())[1] in {".jpg",".jpeg",".png",".webp"})
+                for f in files
+            )):
+                pdf_parts = []
+                for f in files:
+                    b = ensure_pdf_bytes(f["name"], f["bytes"], f["mime"])
+                    if not b:
+                        return await m.answer(f"{f['name']} → PDFga o‘tkaza olmadim (faqat JPG/PNG/WEBP/PDF).",
+                                              reply_markup=kb_convert())
+                    pdf_parts.append(b)
+                out = pdf_parts[0] if len(pdf_parts) == 1 else pdf_merge_bytes(pdf_parts)
+                if not out:
+                    return await m.answer("PDF yig‘ishda xatolik.", reply_markup=kb_convert())
+                await bot.send_document(m.chat.id, BufferedInputFile(out, filename="converted.pdf"),
+                                        caption="✅ Birlashtirilgan PDF tayyor")
+                clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
+
+            # B) Office → PDF (yagona fayl)
             if target == "pdf" and name.endswith((".docx",".pptx",".xlsx")):
                 out = libre_convert(data, "pdf", in_name=name)
-                if not out: return await m.answer("Konvert xatolik.")
-                await bot.send_document(m.chat.id,
+                if not out:
+                    return await m.answer("Konvert xatolik.", reply_markup=kb_convert())
+                await bot.send_document(
+                    m.chat.id,
                     BufferedInputFile(out, filename=f"{os.path.splitext(name)[0]}.pdf"),
-                    caption="✅ PDF tayyor")
-                clear_session(m.from_user.id); return
+                    caption="✅ PDF tayyor"
+                )
+                clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
+            # C) PNG (1-sahifa/slayd)
             if target == "png" and (name.endswith(".pptx") or name.endswith(".pdf")):
                 try:
                     from pdf2image import convert_from_bytes
                     if name.endswith(".pptx"):
                         pdf = libre_convert(data, "pdf", in_name=name)
-                        if not pdf: return await m.answer("PPTX->PDF xatolik.")
+                        if not pdf: return await m.answer("PPTX->PDF xatolik.", reply_markup=kb_convert())
                         pages = convert_from_bytes(pdf, dpi=180, first_page=1, last_page=1)
                     else:
                         pages = convert_from_bytes(data, dpi=180, first_page=1, last_page=1)
@@ -881,20 +1102,23 @@ async def cmd_done(m: Message):
                         BufferedInputFile(buf.getvalue(), filename=f"{os.path.splitext(name)[0]}_1.png"),
                         caption="✅ PNG (1-sahifa/slayd)"
                     )
-                    clear_session(m.from_user.id); return
+                    clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
                 except Exception as e:
                     print("PNG CONVERT ERROR:", repr(e), file=sys.stderr)
-                    return await m.answer("PNG konvert xatolik (poppler/tesseract o‘rnatilganini tekshiring).")
+                    return await m.answer("PNG konvert xatolik (poppler/tesseract o‘rnatilganini tekshiring).",
+                                          reply_markup=kb_convert())
 
-            return await m.answer("Bu yo‘nalish hozircha qo‘llanmaydi.")
+            return await m.answer("Bu yo‘nalish hozircha qo‘llanmaydi.", reply_markup=kb_convert())
+
     except Exception as e:
         print("DONE ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
-        await m.answer("❌ Jarayon davomida xatolik. /status yoki /cancel.")
-        return
+        await m.answer("❌ Jarayon davomida xatolik.", reply_markup=kb_main())
 
 
-# ---- Commands list (menu)
+# =========================
+# Commands list (still useful)
+# =========================
 async def _set_commands():
     cmds = [
         BotCommand(command="start", description="Boshlash"),
@@ -911,19 +1135,21 @@ async def _set_commands():
         BotCommand(command="done", description="Yakunlash"),
         BotCommand(command="cancel", description="Bekor"),
     ]
-    await bot.set_my_commands(cmds)
-    print("✅ Bot commands list yangilandi")
-
-
-@app.on_event("startup")
-async def on_startup():
     try:
-        await _set_commands()
+        await bot.set_my_commands(cmds)
+        print("✅ Bot commands list yangilandi")
     except Exception as e:
         print("SET COMMANDS ERROR:", repr(e), file=sys.stderr)
 
 
-# ---- Webhook
+@app.on_event("startup")
+async def on_startup():
+    await _set_commands()
+
+
+# =========================
+# Webhook
+# =========================
 @app.post("/bot/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -948,7 +1174,9 @@ async def set_webhook(base: str | None = None):
     return {"ok": True, "webhook": f"{base_url}/bot/webhook"}
 
 
-# ---- Debug
+# =========================
+# Debug
+# =========================
 @app.get("/debug/ping")
 def debug_ping():
     return {"status": "ok"}
