@@ -30,7 +30,7 @@ from aiogram.filters import Command
 
 # ---------- Konvert/ocr kutubxonalar ----------
 from PIL import Image
-from PyPDF2 import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -168,10 +168,14 @@ async def _download_photo_to_path(photo_sizes, out_path: str) -> bool:
         return False
 
 # -------------- SESSION (patched) --------------
-def new_session(uid: int, op: str, keep_tmp: bool = False):  # PATCH
-    if not keep_tmp:
-        clean_user_tmp(uid)
+def new_session(uid: int, op: str, keep_tmp: bool = True):
+    # oldin bu yerda clean_user_tmp() bor edi -> olib tashladik
     SESS[uid] = {"op": op, "files": [], "params": {}}
+# PENDING fayllar bo'lsa avtomatik sessiyaga biriktiramiz
+if PENDING.get(uid):
+    SESS[uid]["files"] = [f for f in PENDING[uid] if os.path.exists(f["path"])]
+    PENDING[uid] = []
+
 
 def get_session(uid: int) -> Optional[Dict[str, Any]]:
     return SESS.get(uid)
@@ -263,30 +267,32 @@ def pdf_split_bytes(path: str, rng: str) -> Optional[bytes]:
 # -------------- PAGE NUMBERS / WATERMARK --------------
 def pdf_overlay_text(pdf_path: str, text: str, pos: str = "bottom-center") -> Optional[bytes]:
     try:
-        # tayyor overlay (A4) – dinamik o‘lcham uchun oddiy yechim
-        packet = io.BytesIO()
-        c = canvas.Canvas(packet, pagesize=A4)
-        w, h = A4
-        c.setFont("Helvetica", 12)
-        if pos == "bottom-center":
-            c.drawCentredString(w/2, 10*mm, text)
-        elif pos == "top-right":
-            c.drawRightString(w-10*mm, h-10*mm, text)
-        else:
-            c.drawCentredString(w/2, 10*mm, text)
-        c.save()
-        packet.seek(0)
-
         base = PdfReader(pdf_path)
-        overlay = PdfReader(packet)
         out = PdfWriter()
-        for i, pg in enumerate(base.pages, start=1):
-            p = PdfWriter()
-            p.add_page(pg)
-            # oddiy qo‘shish: PyPDF2 da "merge_page" o‘rnini bosuvchi API yo‘q,
-            # shuning uchun bu yerda faqat base sahifani qo‘shamiz, real overlay
-            # uchun pikepdf yoki boros (yoki reportlab bilan sahifalab chizish) ishlatiladi.
-            out.add_page(pg)
+        total = len(base.pages)
+
+        for page_index in range(total):
+            page = base.pages[page_index]
+            w = float(page.mediabox.width)
+            h = float(page.mediabox.height)
+
+            # har sahifa o‘lchamida overlay yasaymiz
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=(w, h))
+            c.setFont("Helvetica", 14)
+            if pos == "bottom-center":
+                c.drawCentredString(w/2, 12*mm, text)
+            elif pos == "top-right":
+                c.drawRightString(w-12*mm, h-12*mm, text)
+            else:
+                c.drawCentredString(w/2, 12*mm, text)
+            c.save()
+            buf.seek(0)
+
+            overlay = PdfReader(buf).pages[0]
+            page.merge_page(overlay)  # pypdf: real overlay
+            out.add_page(page)
+
         bio = io.BytesIO()
         out.write(bio)
         return bio.getvalue()
@@ -294,12 +300,34 @@ def pdf_overlay_text(pdf_path: str, text: str, pos: str = "bottom-center") -> Op
         print("PDF OVERLAY ERROR:", repr(e), file=sys.stderr)
         return None
 
+
 def pdf_add_pagenumbers(pdf_path: str, pos: str = "bottom-center") -> Optional[bytes]:
     try:
-        r = PdfReader(pdf_path)
+        base = PdfReader(pdf_path)
         out = PdfWriter()
-        for i, pg in enumerate(r.pages, start=1):
-            out.add_page(pg)
+        total = len(base.pages)
+
+        for idx, page in enumerate(base.pages, start=1):
+            w = float(page.mediabox.width)
+            h = float(page.mediabox.height)
+
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=(w, h))
+            c.setFont("Helvetica", 12)
+            label = f"{idx} / {total}"
+            if pos == "bottom-center":
+                c.drawCentredString(w/2, 10*mm, label)
+            elif pos == "top-right":
+                c.drawRightString(w-10*mm, h-10*mm, label)
+            else:
+                c.drawCentredString(w/2, 10*mm, label)
+            c.save()
+            buf.seek(0)
+
+            overlay = PdfReader(buf).pages[0]
+            page.merge_page(overlay)  # pypdf: real overlay
+            out.add_page(page)
+
         bio = io.BytesIO()
         out.write(bio)
         return bio.getvalue()
@@ -634,6 +662,13 @@ async def done_handler(m: Message):
 
 # ----------------- FAYL QABULI + TAVSIYA -----------------
 async def handle_incoming_file(m: Message, name: str, local_path: str, mime: str):
+    s = get_session(uid)
+    if s:
+       return await m.answer(
+        "⚠️ Avval joriy sessiyani yakunlang yoki ❌ Bekor qiling.",
+        reply_markup=kb_session(s["op"])
+    )
+    
     uid = m.from_user.id
     add_pending(uid, local_path, name, mime)
     await m.answer(

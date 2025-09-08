@@ -21,3 +21,4 @@ googletrans==4.0.0-rc1
 
 # --- Pydantic mosligi (aiogram 3.4.1 bilan) ---
 pydantic==2.5.3            # < 2.6 bo‘lishi shart
+pypdf==4.3.1
