@@ -34,6 +34,7 @@ BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
+# Fayl hajmi limiti OLIB TASHLANDI: quyidagi konstantalardan foydalanilmaydi
 MAX_FILE_MB = 10
 MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
 
@@ -278,6 +279,19 @@ def ocr_pdf_to_text(pdf_bytes: bytes, lang: str = "eng") -> str:
         return ""
 
 
+# === Yangi: RASM OCR ===
+def ocr_image_to_text(image_bytes: bytes, lang: str = "eng") -> str:
+    try:
+        from PIL import Image
+        import pytesseract
+        img = Image.open(io.BytesIO(image_bytes))
+        return pytesseract.image_to_string(img, lang=lang).strip()
+    except Exception as e:
+        print("IMG OCR ERROR:", repr(e), file=sys.stderr)
+        traceback.print_exc()
+        return ""
+
+
 # Images → PDF page, and make any input become PDF bytes
 def image_to_pdf_page(img_bytes: bytes) -> Optional[bytes]:
     try:
@@ -307,6 +321,32 @@ def ensure_pdf_bytes(name: str, data: bytes, mime: str) -> Optional[bytes]:
     if mime in {"image/jpeg", "image/png", "image/webp"} or ext in {".jpg", ".jpeg", ".png", ".webp"}:
         return image_to_pdf_page(data)
     return None
+
+
+# === Yangi: fayl turi bo‘yicha tavsiya ===
+def _guess_kind(name: str, mime: str) -> str:
+    ext = (os.path.splitext(name.lower())[1] or "")
+    if mime == "application/pdf" or ext == ".pdf":
+        return "pdf"
+    if ext in {".docx", ".pptx", ".xlsx"}:
+        return "office"
+    if mime in {"image/jpeg", "image/png", "image/webp"} or ext in {".jpg", ".jpeg", ".png", ".webp"}:
+        return "image"
+    return "other"
+
+
+def _suggestions_for(name: str, mime: str) -> str:
+    kind = _guess_kind(name, mime)
+    if kind == "pdf":
+        return ("Bu PDF fayl. Mos funksiyalar: "
+                f"{BTN_SPLIT}, {BTN_MERGE}, {BTN_PAGENUM}, {BTN_WM}, {BTN_OCR}, {BTN_CONVERT}, {BTN_TRANSLATE}.")
+    if kind == "image":
+        return ("Bu rasm (Document). Mos funksiyalar: "
+                f"{BTN_OCR} (matn olish), {BTN_CONVERT} → {BTN_TARGET_PDF} (PDFga).")
+    if kind == "office":
+        return ("Bu Office fayl. Mos funksiyalar: "
+                f"{BTN_CONVERT} → {BTN_TARGET_PDF}.")
+    return ("Fayl turi qo‘llab-quvvatlanmasligi mumkin. Qo‘llanadiganlar: PDF, JPG/PNG/WEBP, DOCX/PPTX/XLSX.")
 
 
 # =========================
@@ -875,25 +915,20 @@ async def reject_photo(m: Message):
     await m.reply("🖼 Rasmni **Document (File)** sifatida yuboring. (Telegram orqali fayl limiti: 10 MB)")
 
 
-# Fayl qabul qilish (LIMIT bilan)
+# Fayl qabul qilish (LIMIT OLIB TASHLANDI + tavsiya qo‘shildi)
 @dp.message(F.document)
 async def collect_file(m: Message):
     s = get_session(m.from_user.id)
-    if not s:
-        return
-
-    size_bytes = m.document.file_size or 0
-    if size_bytes > MAX_FILE_SIZE:
-        clear_session(m.from_user.id)
-        mb = size_bytes / (1024 * 1024)
-        return await m.reply(
-            f"❌ Fayl juda katta: {mb:.1f} MB. Maksimum {MAX_FILE_MB} MB.\n"
-            f"Jarayon bekor qilindi. Kichikroq fayl bilan qayta boshlang.",
-            reply_markup=kb_main()
-        )
 
     name = m.document.file_name or "file.bin"
     mime = m.document.mime_type or "application/octet-stream"
+
+    # Sessiya yo‘q bo‘lsa — fayl turiga qarab tavsiya beramiz va qaytamiz
+    if not s:
+        suggest = _suggestions_for(name, mime)
+        return await m.reply(f"📎 Qabul qilindi: {name}\n{suggest}", reply_markup=kb_main())
+
+    # (Fayl hajmi cheklovi olib tashlandi — hech qanday size tekshiruvi yo‘q)
 
     data = None
     try:
@@ -928,6 +963,22 @@ async def collect_file(m: Message):
 
     if op in {"split", "pagenum", "watermark", "ocr", "translate"}:
         s["files"] = [{"name": name, "bytes": data, "mime": mime}]
+
+        # === O'zgartirish: OCR PDF ham, RASM (Document) ham qabul qiladi ===
+        if op == "ocr":
+            is_pdf = (mime == "application/pdf" or (os.path.splitext(name.lower())[1] or "") == ".pdf")
+            is_img = (mime in {"image/jpeg", "image/png", "image/webp"} or
+                      (os.path.splitext(name.lower())[1] or "") in {".jpg", ".jpeg", ".png", ".webp"})
+            if not (is_pdf or is_img):
+                return await m.reply("Bu sessiyada faqat PDF yoki RASM (Document) qabul qilinadi.",
+                                     reply_markup=kb_ocr())
+            return await m.reply(
+                f"Fayl qabul qilindi: {name} ({human_size(len(data))}) ✅\n"
+                "Parametr(lar)ni tanlang, so‘ng ✅ Yakunlash.",
+                reply_markup=kb_ocr()
+            )
+
+        # qolganlari: faqat PDF talabi o‘zgarishsiz
         if mime != "application/pdf":
             return await m.reply("Bu sessiyada faqat PDF qabul qilinadi.",
                                  reply_markup=kb_pagenum() if op=="pagenum" else
@@ -1017,10 +1068,32 @@ async def done_handler(m: Message):
             clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
 
         if op == "ocr":
-            if not files: return await m.answer("PDF yuboring.", reply_markup=kb_ocr())
-            lang = p.get("lang", "eng")
-            txt = ocr_pdf_to_text(files[0]["bytes"], lang=lang)
-            if not txt: return await m.answer("OCR natijasi bo‘sh. Tilni tekshiring.", reply_markup=kb_ocr())
+            if not files: return await m.answer("PDF yoki rasm (Document) yuboring.", reply_markup=kb_ocr())
+            # default: AUTO til
+            lang = (p.get("lang") or "auto").lower()
+            if lang == "auto":
+                # tesseract uchun kombi — auto-detect sifatida ishlatamiz
+                lang = "eng+rus+uzb"
+
+            f0 = files[0]
+            name = f0["name"].lower()
+            mime = f0["mime"]
+            data = f0["bytes"]
+
+            is_pdf = (mime == "application/pdf" or (os.path.splitext(name)[1] or "") == ".pdf")
+            is_img = (mime in {"image/jpeg", "image/png", "image/webp"} or
+                      (os.path.splitext(name)[1] or "") in {".jpg", ".jpeg", ".png", ".webp"})
+
+            if is_pdf:
+                txt = ocr_pdf_to_text(data, lang=lang)
+            elif is_img:
+                txt = ocr_image_to_text(data, lang=lang)
+            else:
+                return await m.answer("Faqar PDF yoki rasm (Document) qo‘llanadi.", reply_markup=kb_ocr())
+
+            if not txt:
+                return await m.answer("OCR natijasi bo‘sh. Tilni tekshiring yoki sifatliroq fayl yuboring.",
+                                      reply_markup=kb_ocr())
             await bot.send_document(m.chat.id, BufferedInputFile(txt.encode("utf-8"), filename="ocr.txt"),
                                     caption=f"✅ OCR tayyor (lang={lang})")
             clear_session(m.from_user.id); return await m.answer("✅ Tugadi.", reply_markup=kb_main())
