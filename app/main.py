@@ -80,25 +80,32 @@ translator = Translator()
 # =========================
 # UI: Klaviaturalar
 # =========================
+# === PATCH: klaviaturalar ===
+
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+
 def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[
             [
-                KeyboardButton("🆕 Rezyume"), KeyboardButton("🔄 Konvert"),
-                KeyboardButton("📎 Birlashtirish")
+                KeyboardButton(text="🆕 Rezyume"),
+                KeyboardButton(text="🔄 Konvert"),
+                KeyboardButton(text="📎 Birlashtirish"),
             ],
             [
-                KeyboardButton("✂️ Ajratish"), KeyboardButton("🔢 Raqamlash"),
-                KeyboardButton("💧 Watermark")
+                KeyboardButton(text="✂️ Ajratish"),
+                KeyboardButton(text="🔢 Raqamlash"),
+                KeyboardButton(text="💧 Watermark"),
             ],
             [
-                KeyboardButton("🔎 OCR"), KeyboardButton("🌐 Tarjima")
+                KeyboardButton(text="🔎 OCR"),
+                KeyboardButton(text="🌐 Tarjima"),
             ],
             [
-                KeyboardButton("ℹ️ Yordam")
+                KeyboardButton(text="ℹ️ Yordam"),
             ],
-        ]
+        ],
     )
 
 def kb_session(op: str) -> ReplyKeyboardMarkup:
@@ -111,14 +118,29 @@ def kb_session(op: str) -> ReplyKeyboardMarkup:
         "ocr": "🔎 OCR",
         "translate": "🌐 Tarjima",
     }.get(op, "Jarayon")
+
     return ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[
-            [KeyboardButton("✅ Yakunlash"), KeyboardButton("❌ Bekor")],
-            [KeyboardButton("📋 Holat")],
-            [KeyboardButton(f"↩️ Asosiy menyu ({suffix})")]
-        ]
+            [KeyboardButton(text="✅ Yakunlash"), KeyboardButton(text="❌ Bekor")],
+            [KeyboardButton(text="📋 Holat")],
+            [KeyboardButton(text=f"↩️ Asosiy menyu ({suffix})")],
+        ],
     )
+
+def kb_webapp(id_val: int) -> InlineKeyboardMarkup:
+    base = (APP_BASE or "").rstrip("/")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Obyektivkani to‘ldirish",
+                web_app=WebAppInfo(url=f"{base}/form?id={id_val}")
+            )
+        ]]
+    )
+
+
+
 
 def kb_suggest() -> InlineKeyboardMarkup:
     # Fayl kelganda sessiya yo'q bo'lsa chiqadi
