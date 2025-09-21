@@ -39,7 +39,7 @@ from googletrans import Translator
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
+BOT_TOKEN = BOS_TOKEN
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
