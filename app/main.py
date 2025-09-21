@@ -11,8 +11,7 @@ import tempfile
 import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
-PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
-BOT_TOKEN = os.getenv("BOS_TOKEN", "")
+
 
 
 from fastapi import FastAPI, Request, Form, UploadFile
@@ -48,7 +47,8 @@ GROUP_CHAT_ID = -1003046464831
 WORKDIR = "/tmp/ofm_bot"
 ADMINS = {684983417}                 # kerak bo‘lsa qo‘shimcha admin id’larni qo‘shing
 ADMIN_WEB_KEY = "ofm"                # /admin?key=ofm; xohlasa o‘zgartiring
-
+PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
+BOT_TOKEN = os.getenv("BOS_TOKEN", "")
 # =========================
 # GLOBAL (RAM)
 # =========================
