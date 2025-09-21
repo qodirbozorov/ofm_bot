@@ -12,7 +12,7 @@ import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
 PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
-BOS_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOS_TOKEN", "")
 
 
 from fastapi import FastAPI, Request, Form, UploadFile
@@ -42,7 +42,6 @@ from googletrans import Translator
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = BOS_TOKEN
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
