@@ -11,6 +11,9 @@ import tempfile
 import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
+PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
 
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
