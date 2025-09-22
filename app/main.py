@@ -43,7 +43,6 @@ from googletrans import Translator
 
 PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")         # bo‘lmasa "" qaytadi
-BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
