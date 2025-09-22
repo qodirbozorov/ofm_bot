@@ -12,8 +12,6 @@ import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
 
-
-
 from fastapi import FastAPI, Request, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -41,14 +39,18 @@ from googletrans import Translator
 # =========================
 # CONFIG
 # =========================
+
+
+PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")         # bo‘lmasa "" qaytadi
+BOT_TOKEN = "8315167854:AAF5uiTDQ82zoAuL0uGv7s_kSPezYtGLteA"
 APP_BASE = "https://ofmbot-production.up.railway.app"
 GROUP_CHAT_ID = -1003046464831
 
 WORKDIR = "/tmp/ofm_bot"
 ADMINS = {684983417}                 # kerak bo‘lsa qo‘shimcha admin id’larni qo‘shing
 ADMIN_WEB_KEY = "ofm"                # /admin?key=ofm; xohlasa o‘zgartiring
-PORT = int(os.getenv("PORT", "8080"))          # Railway qo‘yadi
-BOT_TOKEN = os.getenv("BOS_TOKEN", "")
+
 # =========================
 # GLOBAL (RAM)
 # =========================
